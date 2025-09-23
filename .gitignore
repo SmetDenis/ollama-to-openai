@@ -208,5 +208,5 @@ __marimo__/
 
 # Configs
 .idea
-config.yaml
+config.yml
 .claude
