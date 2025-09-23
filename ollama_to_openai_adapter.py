@@ -283,11 +283,9 @@ def show_model():
     if error:
         return error
 
-    model_identifier, error = validate_model_parameter(data)
+    model_id, error = validate_model_parameter(data)
     if error:
         return error
-
-    model_id = model_identifier.replace(":latest", "")
 
     response_data = {
         "modelfile": "\n".join([
@@ -387,7 +385,7 @@ def chat():
         if error:
             return error
 
-        model, error = validate_model_parameter(data)
+        model_id, error = validate_model_parameter(data)
         if error:
             return error
 
@@ -399,8 +397,6 @@ def chat():
             return jsonify({"error": "Parameter 'messages' must be a non-empty list"}), 400
 
         stream = data.get("stream", False)
-
-        model_id = model.split(':')[0]
 
         if stream:
             def generate_stream():
@@ -428,7 +424,7 @@ def chat():
                         content = chunk.choices[0].delta.content
                         if content:
                             ollama_chunk = {
-                                "model": model,
+                                "model": model_id,
                                 "created_at": datetime.now().isoformat() + "Z",
                                 "message": {"role": "assistant", "content": content},
                                 "done": False
@@ -436,7 +432,7 @@ def chat():
                             yield json.dumps(ollama_chunk) + '\n'
 
                     duration_ns = int((time.time() - start_time) * 1e9)
-                    final_response = create_final_response(model, prompt_tokens if prompt_tokens != -1 else 0, completion_tokens, duration_ns)
+                    final_response = create_final_response(model_id, prompt_tokens if prompt_tokens != -1 else 0, completion_tokens, duration_ns)
                     final_response["message"] = {"role": "assistant", "content": ""}
                     yield json.dumps(final_response) + '\n'
 
@@ -455,7 +451,7 @@ def chat():
             duration_ns = int((time.time() - start_time) * 1e9)
 
             final_response = create_final_response(
-                model,
+                model_id,
                 response.usage.prompt_tokens,
                 response.usage.completion_tokens,
                 duration_ns
@@ -485,7 +481,7 @@ def generate():
         if error:
             return error
 
-        model, error = validate_model_parameter(data)
+        model_id, error = validate_model_parameter(data)
         if error:
             return error
 
@@ -497,8 +493,6 @@ def generate():
             return jsonify({"error": "Parameter 'prompt' must be a non-empty string"}), 400
 
         stream = data.get("stream", False)
-
-        model_id = model.split(':')[0]
 
         # Convert prompt to messages format for OpenAI
         messages = [{"role": "user", "content": prompt}]
@@ -562,7 +556,7 @@ def generate():
                 return jsonify({"error": "No response choices returned from OpenAI"}), 500
 
             final_response = create_final_response(
-                model,
+                model_id,
                 response.usage.prompt_tokens,
                 response.usage.completion_tokens,
                 duration_ns
