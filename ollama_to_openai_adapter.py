@@ -156,8 +156,6 @@ def log_endpoint(f):
 
     return decorated_function
 
-# --- 1. Загрузка и валидация конфигурации ---
-
 def load_config(path='config.yml'):
     """Loads and validates YAML configuration file."""
     try:
@@ -186,13 +184,8 @@ log_level = getattr(logging, CONFIG.get('logging', {}).get('log_level', 'INFO').
 logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        # logging.FileHandler('ollama_adapter.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
-
-# --- 2. Инициализация клиента и кэша ---
 
 try:
     client = OpenAI(
@@ -250,8 +243,6 @@ def get_and_cache_models():
     except Exception as e:
         logger.error(f"Critical error getting models from OpenAI: {e}")
         return []
-
-# --- 3. Реализация эндпоинтов ---
 
 @app.route('/api/tags', methods=['GET', 'POST'])
 @log_endpoint
@@ -335,7 +326,7 @@ def show_model():
         "model_info": {
             "general.architecture": "llama",
             "general.file_type": 2,
-            "llama.context_length": 5000000,
+            "llama.context_length": 256000,
         },
 
         "capabilities": ["completion", "vision"]
@@ -344,12 +335,10 @@ def show_model():
 
 def get_model_config(model_id):
     """
-    Returns model configuration with temperature parameter.
-    Works with models list format: [{name: "model-name", temperature: 0.7}, ...]
+    Returns model configuration with all parameters from config.
+    Works with models list format: [{name: "model-name", temperature: 0.7, max_tokens: 1000}, ...]
+    Passes through any parameters found in config without validation or defaults.
     """
-    # Default temperature
-    default_temperature = 0.3
-
     # Check for model-specific configuration in config
     models_config = CONFIG.get('models', [])
 
@@ -361,16 +350,13 @@ def get_model_config(model_id):
             break
 
     if model_entry is None:
-        # Model not in config, use default
-        temperature = default_temperature
+        # Model not in config, return empty parameters
+        return {'model_id': model_id}
     else:
-        # Model found, get temperature or use default
-        temperature = model_entry.get('temperature', default_temperature)
-
-    return {
-        'model_id': model_id,
-        'temperature': temperature
-    }
+        # Model found, return all parameters except 'name'
+        config_params = {k: v for k, v in model_entry.items() if k != 'name'}
+        config_params['model_id'] = model_id
+        return config_params
 
 def create_final_response(model_name, prompt_tokens, completion_tokens, total_duration_ns):
     """
@@ -424,13 +410,20 @@ def chat():
                     # Get model configuration
                     model_config = get_model_config(model_id)
 
-                    response_stream = client.chat.completions.create(
-                        model=model_id,
-                        messages=messages,
-                        stream=True,
-                        stream_options={"include_usage": True},
-                        temperature=model_config['temperature']
-                    )
+                    # Prepare OpenAI API parameters
+                    api_params = {
+                        'model': model_id,
+                        'messages': messages,
+                        'stream': True,
+                        'stream_options': {"include_usage": True}
+                    }
+
+                    # Add all model-specific parameters from config
+                    for key, value in model_config.items():
+                        if key != 'model_id':  # Skip our internal field
+                            api_params[key] = value
+
+                    response_stream = client.chat.completions.create(**api_params)
                     for chunk in response_stream:
                         if chunk.usage: # OpenAI may send usage in the last chunk
                             prompt_tokens = chunk.usage.prompt_tokens
@@ -459,12 +452,20 @@ def chat():
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
             model_config = get_model_config(model_id)
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                stream=False,
-                temperature=model_config['temperature']
-            )
+
+            # Prepare OpenAI API parameters
+            api_params = {
+                'model': model_id,
+                'messages': messages,
+                'stream': False
+            }
+
+            # Add all model-specific parameters from config
+            for key, value in model_config.items():
+                if key != 'model_id':  # Skip our internal field
+                    api_params[key] = value
+
+            response = client.chat.completions.create(**api_params)
             duration_ns = int((time.time() - start_time) * 1e9)
 
             final_response = create_final_response(
@@ -524,13 +525,20 @@ def generate():
                     # Get model configuration
                     model_config = get_model_config(model_id)
 
-                    response_stream = client.chat.completions.create(
-                        model=model_id,
-                        messages=messages,
-                        stream=True,
-                        stream_options={"include_usage": True},
-                        temperature=model_config['temperature']
-                    )
+                    # Prepare OpenAI API parameters
+                    api_params = {
+                        'model': model_id,
+                        'messages': messages,
+                        'stream': True,
+                        'stream_options': {"include_usage": True}
+                    }
+
+                    # Add all model-specific parameters from config
+                    for key, value in model_config.items():
+                        if key != 'model_id':  # Skip our internal field
+                            api_params[key] = value
+
+                    response_stream = client.chat.completions.create(**api_params)
                     for chunk in response_stream:
                         if chunk.usage:
                             prompt_tokens = chunk.usage.prompt_tokens
@@ -561,12 +569,20 @@ def generate():
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
             model_config = get_model_config(model_id)
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                stream=False,
-                temperature=model_config['temperature']
-            )
+
+            # Prepare OpenAI API parameters
+            api_params = {
+                'model': model_id,
+                'messages': messages,
+                'stream': False
+            }
+
+            # Add all model-specific parameters from config
+            for key, value in model_config.items():
+                if key != 'model_id':  # Skip our internal field
+                    api_params[key] = value
+
+            response = client.chat.completions.create(**api_params)
             duration_ns = int((time.time() - start_time) * 1e9)
 
             if not response.choices:
@@ -693,7 +709,6 @@ def root():
     })
 
 
-# --- 4. Запуск сервера ---
 if __name__ == '__main__':
     get_and_cache_models()
 
