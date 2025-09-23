@@ -98,17 +98,15 @@ def log_endpoint(f):
         # Get the actual endpoint path
         endpoint_path = request.path
 
-        # Log request
-        log_request(endpoint_path, request.method)
-
-        # Log request data if it's a JSON request
+        # Log request with data if it's a JSON request
         if request.is_json:
             try:
                 data = request.get_json()
-                if data:
-                    log_request(endpoint_path, request.method, data)
+                log_request(endpoint_path, request.method, data)
             except:
-                pass
+                log_request(endpoint_path, request.method)
+        else:
+            log_request(endpoint_path, request.method)
 
         start_time = time.time()
 
@@ -160,7 +158,7 @@ def log_endpoint(f):
 
 # --- 1. Загрузка и валидация конфигурации ---
 
-def load_config(path='config.yaml'):
+def load_config(path='config.yml'):
     """Loads and validates YAML configuration file."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -173,11 +171,11 @@ def load_config(path='config.yaml'):
         exit(1)
 
     if not config.get('openai', {}).get('api_key'):
-        raise ValueError("Missing required parameter 'openai.api_key' in config.yaml")
+        raise ValueError("Missing required parameter 'openai.api_key' in config.yml")
     if not config.get('server', {}).get('host'):
-        raise ValueError("Missing required parameter 'server.host' in config.yaml")
+        raise ValueError("Missing required parameter 'server.host' in config.yml")
     if not config.get('server', {}).get('port'):
-        raise ValueError("Missing required parameter 'server.port' in config.yaml")
+        raise ValueError("Missing required parameter 'server.port' in config.yml")
 
     return config
 
