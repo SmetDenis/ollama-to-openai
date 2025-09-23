@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  ollama-to-openai:
+    build: .
+    ports:
+      - "11345:11434"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    restart: unless-stopped
