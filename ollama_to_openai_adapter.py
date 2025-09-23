@@ -218,11 +218,14 @@ def get_and_cache_models():
     logger.info("Model cache is empty. Requesting model list from OpenAI...")
     try:
         all_models_response = client.models.list().data
-        allowed_models_list = CONFIG['openai'].get('allowed_models', [])
+        models_config = CONFIG.get('models', [])
 
+        # If models list is empty, use all available models
+        # Otherwise, filter to only those specified in models list
         filtered_models = all_models_response
-        if allowed_models_list:
-            filtered_models = [m for m in all_models_response if m.id in allowed_models_list]
+        if models_config:
+            allowed_model_names = [model_entry['name'] for model_entry in models_config if 'name' in model_entry]
+            filtered_models = [m for m in all_models_response if m.id in allowed_model_names]
 
         CACHED_MODELS = [
             {
@@ -341,14 +344,28 @@ def show_model():
 
 def get_model_config(model_id):
     """
-    Returns simple model configuration with only temperature parameter.
+    Returns model configuration with temperature parameter.
+    Works with models list format: [{name: "model-name", temperature: 0.7}, ...]
     """
     # Default temperature
     default_temperature = 0.3
 
-    # Check for model-specific temperature override in config
-    model_configs = CONFIG.get('models', {})
-    temperature = model_configs.get(model_id, {}).get('temperature', default_temperature)
+    # Check for model-specific configuration in config
+    models_config = CONFIG.get('models', [])
+
+    # Find model entry by name
+    model_entry = None
+    for model_config in models_config:
+        if isinstance(model_config, dict) and model_config.get('name') == model_id:
+            model_entry = model_config
+            break
+
+    if model_entry is None:
+        # Model not in config, use default
+        temperature = default_temperature
+    else:
+        # Model found, get temperature or use default
+        temperature = model_entry.get('temperature', default_temperature)
 
     return {
         'model_id': model_id,

@@ -24,7 +24,7 @@ Accept: application/json
 Content-Type: application/json
 
 {
-    "model": "openai/gpt-4o-mini"
+    "model": "gemini/gemini-2.5-flash"
 }
 
 ### 6. Show Model Details - Get model information
@@ -33,7 +33,7 @@ Accept: application/json
 Content-Type: application/json
 
 {
-    "model": "openai/gpt-4o-mini"
+    "model": "gemini/gemini-2.5-flash"
 }
 
 ### 7. Show Model Details - With :latest suffix
@@ -42,7 +42,7 @@ Accept: application/json
 Content-Type: application/json
 
 {
-    "model": "openai/gpt-4o-mini:latest"
+    "model": "gemini/gemini-2.5-flash:latest"
 }
 
 ### 8. Chat Completion - Simple non-streaming chat

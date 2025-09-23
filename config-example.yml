@@ -15,18 +15,18 @@ openai:
   # Useful for OpenAI-compatible APIs like Azure OpenAI, local LLMs, etc.
   # base_url: "https://your-custom-openai-endpoint.com/v1"
 
-  # List of allowed models (optional, if not specified all models will be available)
-  # This filters which OpenAI models are exposed through the adapter
-  allowed_models:
-    - "openai/gpt-4o-mini"
-
 # Logging configuration (optional)
 logging:
   log_level: "WARNING"    # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
   log_requests: false     # Whether to log request/response details
 
-# Model-specific configurations (optional)
-# Override default temperature for specific models
+# Model configurations (optional)
+# If empty, all OpenAI models will be available with default settings
+# If specified, only these models will be exposed through the adapter
 models:
-  openai/gpt-4o-mini:
-    temperature: 1
+  # Simple model name - uses default temperature (0.3)
+  - name: openai/gpt-4o-mini
+
+  # Model with custom temperature
+  - name: openai/gpt-4o
+    temperature: 0.7
