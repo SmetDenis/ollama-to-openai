@@ -345,52 +345,18 @@ def show_model():
 
 def get_model_config(model_id):
     """
-    Returns model configuration including OpenAI parameters.
-    Different model providers support different parameters.
+    Returns simple model configuration with only temperature parameter.
     """
-    # Base parameters supported by most models
-    base_params = {
-        'temperature': 0.7,
-        'max_tokens': None,  # Let the provider use model defaults
-    }
+    # Default temperature
+    default_temperature = 0.3
 
-    # Additional parameters based on model type
-    if model_id.startswith('gpt-') or model_id.startswith('o1-'):
-        # OpenAI models support all parameters
-        additional_params = {
-            'top_p': 1.0,
-            'frequency_penalty': 0.0,
-            'presence_penalty': 0.0
-        }
-    elif 'gemini' in model_id.lower():
-        # Gemini models have limited parameter support
-        additional_params = {
-            'top_p': 1.0,
-        }
-    elif 'claude' in model_id.lower():
-        # Claude models support temperature and top_p
-        additional_params = {
-            'top_p': 1.0,
-        }
-    else:
-        # For unknown models, use minimal safe parameters
-        additional_params = {
-            'top_p': 1.0,
-        }
-
-    # Merge base and additional params
-    default_params = {**base_params, **additional_params}
-
-    # Check if there are model-specific overrides in config
+    # Check for model-specific temperature override in config
     model_configs = CONFIG.get('models', {})
-    model_specific_params = model_configs.get(model_id, {}).get('openai_params', {})
-
-    # Merge default params with model-specific overrides
-    openai_params = {**default_params, **model_specific_params}
+    temperature = model_configs.get(model_id, {}).get('temperature', default_temperature)
 
     return {
         'model_id': model_id,
-        'openai_params': openai_params
+        'temperature': temperature
     }
 
 def create_final_response(model_name, prompt_tokens, completion_tokens, total_duration_ns):
@@ -444,16 +410,15 @@ def chat():
                 prompt_tokens = -1 # Will be determined later if OpenAI returns it
 
                 try:
-                    # Get model configuration and apply OpenAI parameters
+                    # Get model configuration
                     model_config = get_model_config(model_id)
-                    openai_params = model_config['openai_params']
 
                     response_stream = client.chat.completions.create(
                         model=model_id,
                         messages=messages,
                         stream=True,
                         stream_options={"include_usage": True},
-                        **openai_params
+                        temperature=model_config['temperature']
                     )
                     for chunk in response_stream:
                         if chunk.usage: # OpenAI may send usage in the last chunk
@@ -482,8 +447,12 @@ def chat():
 
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
+            model_config = get_model_config(model_id)
             response = client.chat.completions.create(
-                model=model_id, messages=messages, stream=False
+                model=model_id,
+                messages=messages,
+                stream=False,
+                temperature=model_config['temperature']
             )
             duration_ns = int((time.time() - start_time) * 1e9)
 
@@ -543,16 +512,15 @@ def generate():
                 full_response = ""
 
                 try:
-                    # Get model configuration and apply OpenAI parameters
+                    # Get model configuration
                     model_config = get_model_config(model_id)
-                    openai_params = model_config['openai_params']
 
                     response_stream = client.chat.completions.create(
                         model=model_id,
                         messages=messages,
                         stream=True,
                         stream_options={"include_usage": True},
-                        **openai_params
+                        temperature=model_config['temperature']
                     )
                     for chunk in response_stream:
                         if chunk.usage:
@@ -583,8 +551,12 @@ def generate():
 
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
+            model_config = get_model_config(model_id)
             response = client.chat.completions.create(
-                model=model_id, messages=messages, stream=False
+                model=model_id,
+                messages=messages,
+                stream=False,
+                temperature=model_config['temperature']
             )
             duration_ns = int((time.time() - start_time) * 1e9)
 
