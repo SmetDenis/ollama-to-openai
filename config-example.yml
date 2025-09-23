@@ -18,23 +18,15 @@ openai:
   # List of allowed models (optional, if not specified all models will be available)
   # This filters which OpenAI models are exposed through the adapter
   allowed_models:
-    - "gpt-4o"
-    - "gpt-4o-mini"
-    - "gpt-3.5-turbo"
-    - "text-embedding-3-small"
-    - "text-embedding-3-large"
+    - "openai/gpt-4o-mini"
 
 # Logging configuration (optional)
 logging:
-  log_level: "INFO"      # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  log_requests: true     # Whether to log request/response details
+  log_level: "WARNING"    # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_requests: false     # Whether to log request/response details
 
 # Model-specific configurations (optional)
 # Override default temperature for specific models
 models:
-  gpt-4o:
-    temperature: 0.3
-  gpt-4o-mini:
-    temperature: 0.5
-  gpt-3.5-turbo:
-    temperature: 0.7
+  openai/gpt-4o-mini:
+    temperature: 1
