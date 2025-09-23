@@ -604,7 +604,7 @@ def generate():
 @log_endpoint
 def version():
     """Return version information."""
-    return jsonify({"version": "0.1.0-openai-adapter"})
+    return jsonify({"version": "0.1.0"})
 
 @app.route('/api/ps', methods=['GET'])
 @log_endpoint
@@ -678,7 +678,7 @@ def health_check():
                 "openai": openai_status,
                 "cached_models": cached_models_count
             },
-            "version": "0.1.0-openai-adapter"
+            "version": "0.1.0"
         }), 200
 
     except Exception as e:
@@ -695,7 +695,7 @@ def root():
     """Root endpoint with basic service information."""
     return jsonify({
         "service": "Ollama to OpenAI Adapter",
-        "version": "0.1.0-openai-adapter",
+        "version": "0.1.0",
         "endpoints": [
             "/api/tags",
             "/api/show",

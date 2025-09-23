@@ -3,23 +3,23 @@
 # Make sure the server is running: python3 ollama_to_openai_adapter.py
 
 ### 1. Health Check - Verify service is running
-GET http://localhost:11434/health
+GET http://localhost:11345/health
 Accept: application/json
 
 ### 2. Root Endpoint - Service information
-GET http://localhost:11434/
+GET http://localhost:11345/
 Accept: application/json
 
 ### 3. Version - Get adapter version
-GET http://localhost:11434/api/version
+GET http://localhost:11345/api/version
 Accept: application/json
 
 ### 4. List Models - GET all available models
-GET http://localhost:11434/api/tags
+GET http://localhost:11345/api/tags
 Accept: application/json
 
 ### 5. List Models - POST format (search for specific model)
-POST http://localhost:11434/api/tags
+POST http://localhost:11345/api/tags
 Accept: application/json
 Content-Type: application/json
 
@@ -28,7 +28,7 @@ Content-Type: application/json
 }
 
 ### 6. Show Model Details - Get model information
-POST http://localhost:11434/api/show
+POST http://localhost:11345/api/show
 Accept: application/json
 Content-Type: application/json
 
@@ -37,7 +37,7 @@ Content-Type: application/json
 }
 
 ### 7. Show Model Details - With :latest suffix
-POST http://localhost:11434/api/show
+POST http://localhost:11345/api/show
 Accept: application/json
 Content-Type: application/json
 
@@ -46,7 +46,7 @@ Content-Type: application/json
 }
 
 ### 8. Chat Completion - Simple non-streaming chat
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -62,7 +62,7 @@ Content-Type: application/json
 }
 
 ### 9. Chat Completion - Streaming chat
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -82,7 +82,7 @@ Content-Type: application/json
 }
 
 ### 10. Chat Completion - Multi-turn conversation
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -106,7 +106,7 @@ Content-Type: application/json
 }
 
 ### 11. Generate - Simple prompt completion (non-streaming)
-POST http://localhost:11434/api/generate
+POST http://localhost:11345/api/generate
 Accept: application/json
 Content-Type: application/json
 
@@ -117,7 +117,7 @@ Content-Type: application/json
 }
 
 ### 12. Generate - Streaming prompt completion
-POST http://localhost:11434/api/generate
+POST http://localhost:11345/api/generate
 Accept: application/json
 Content-Type: application/json
 
@@ -128,11 +128,11 @@ Content-Type: application/json
 }
 
 ### 15. List Running Models - Mock endpoint
-GET http://localhost:11434/api/ps
+GET http://localhost:11345/api/ps
 Accept: application/json
 
 ### 16. Error Test - Invalid model name
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -147,7 +147,7 @@ Content-Type: application/json
 }
 
 ### 17. Error Test - Missing required field
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -156,7 +156,7 @@ Content-Type: application/json
 }
 
 ### 18. Error Test - Empty messages array
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -166,7 +166,7 @@ Content-Type: application/json
 }
 
 ### 19. Error Test - Invalid JSON
-POST http://localhost:11434/api/chat
+POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
@@ -175,12 +175,3 @@ Content-Type: application/json
     "messages": [
         "role": "user",
         "content": "missing brace"
-
-### 20. Error Test - Missing model parameter
-POST http://localhost:11434/api/show
-Accept: application/json
-Content-Type: application/json
-
-{
-    "name1": ""
-}
