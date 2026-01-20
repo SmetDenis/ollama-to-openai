@@ -546,11 +546,6 @@ def chat():
                     # Get model configuration
                     openai_params, adapter_params = get_model_config(model_id)
 
-                    # Buffering for thinking tag removal
-                    buffer = ""
-                    tag_processed = False
-                    remove_tags = adapter_params.get('remove_thinking_tags', False)
-
                     # Prepare OpenAI API parameters
                     api_params = {
                         'model': original_name,  # Use original name for OpenAI
@@ -565,58 +560,183 @@ def chat():
                             api_params[key] = value
 
                     response_stream = client.chat.completions.create(**api_params)
-                    for chunk in response_stream:
-                        if chunk.usage: # OpenAI may send usage in the last chunk
-                            prompt_tokens = chunk.usage.prompt_tokens
-                            completion_tokens = chunk.usage.completion_tokens
 
-                        if not chunk.choices:
-                            continue
-                        content = chunk.choices[0].delta.content
-                        if content:
-                            if not tag_processed:
-                                # Buffer content until we can detect thinking tags
+                    # State machine for thinking tag removal
+                    remove_tags = adapter_params.get('remove_thinking_tags', False)
+
+                    if remove_tags:
+                        # Initialize state machine
+                        state = "INITIAL"
+                        buffer = ""
+                        thinking_buffer = ""
+                        close_tag_buffer = ""
+
+                        for chunk in response_stream:
+                            # Track usage
+                            if chunk.usage:
+                                prompt_tokens = chunk.usage.prompt_tokens
+                                completion_tokens = chunk.usage.completion_tokens
+
+                            if not chunk.choices:
+                                continue
+
+                            content = chunk.choices[0].delta.content
+                            if not content:
+                                continue
+
+                            # STATE: INITIAL
+                            if state == "INITIAL":
+                                buffer = content
+                                state = "DETECTING_OPEN_TAG"
+                                continue
+
+                            # STATE: DETECTING_OPEN_TAG
+                            elif state == "DETECTING_OPEN_TAG":
                                 buffer += content
+                                buffer_lower = buffer.lstrip().lower()
 
-                                # Check if we have enough content to detect tags
-                                if len(buffer) >= 50 or '>' in buffer:
-                                    # Process buffer for thinking tags
-                                    processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
-                                    tag_processed = True
+                                # Check for opening tags
+                                found_tag = False
+                                for tag in ["<think>", "<thinking>"]:
+                                    if buffer_lower.startswith(tag):
+                                        # Found opening tag!
+                                        whitespace_len = len(buffer) - len(buffer.lstrip())
+                                        tag_end_pos = whitespace_len + len(tag)
+                                        buffer = buffer[tag_end_pos:]
+                                        thinking_buffer = ""
+                                        state = "BUFFERING_THINKING"
+                                        found_tag = True
+                                        logger.debug(f"Detected opening {tag} tag for model '{model_id}'")
+                                        break
 
-                                    # Yield processed buffer if not empty
-                                    if processed_buffer:
-                                        ollama_chunk = {
+                                if found_tag:
+                                    continue
+
+                                # Check if should abandon detection
+                                if len(buffer_lower) > 20 or (len(buffer.lstrip()) > 0 and buffer.lstrip()[0] != '<'):
+                                    # No tag present, switch to normal streaming
+                                    state = "STREAMING_NORMAL"
+                                    logger.debug(f"No thinking tag detected for model '{model_id}'")
+                                    if buffer:
+                                        yield json.dumps({
                                             "model": display_name,
                                             "created_at": datetime.now().isoformat() + "Z",
-                                            "message": {"role": "assistant", "content": processed_buffer},
+                                            "message": {"role": "assistant", "content": buffer},
                                             "done": False
-                                        }
-                                        yield json.dumps(ollama_chunk) + '\n'
-                            else:
-                                # Tags already processed, yield content immediately
-                                ollama_chunk = {
-                                    "model": display_name,  # Return display name to client
+                                        }) + '\n'
+                                        buffer = ""
+                                continue
+
+                            # STATE: BUFFERING_THINKING
+                            elif state == "BUFFERING_THINKING":
+                                buffer += content
+
+                                # Look for closing tag start
+                                if "</" in buffer:
+                                    close_idx = buffer.index("</")
+                                    thinking_buffer += buffer[:close_idx]
+                                    close_tag_buffer = buffer[close_idx:]
+                                    buffer = ""
+                                    state = "DETECTING_CLOSE_TAG"
+                                else:
+                                    # Keep buffering (move to thinking_buffer if getting large)
+                                    if len(buffer) > 1000:
+                                        thinking_buffer += buffer
+                                        buffer = ""
+                                continue
+
+                            # STATE: DETECTING_CLOSE_TAG
+                            elif state == "DETECTING_CLOSE_TAG":
+                                close_tag_buffer += content
+                                close_lower = close_tag_buffer.lower()
+
+                                # Check for complete closing tags
+                                found_close = False
+                                for tag in ["</think>", "</thinking>"]:
+                                    if close_lower.startswith(tag):
+                                        # Found closing tag!
+                                        remainder = close_tag_buffer[len(tag):].lstrip()
+
+                                        # Log removed content
+                                        preview = thinking_buffer[:100] + "..." if len(thinking_buffer) > 100 else thinking_buffer
+                                        logger.debug(f"Removed thinking tags from model '{model_id}'. Thinking content ({len(thinking_buffer)} chars): {preview}")
+
+                                        # Switch to normal streaming
+                                        state = "STREAMING_NORMAL"
+                                        thinking_buffer = ""
+                                        close_tag_buffer = ""
+                                        found_close = True
+
+                                        # Yield remainder if present
+                                        if remainder:
+                                            yield json.dumps({
+                                                "model": display_name,
+                                                "created_at": datetime.now().isoformat() + "Z",
+                                                "message": {"role": "assistant", "content": remainder},
+                                                "done": False
+                                            }) + '\n'
+                                        break
+
+                                if found_close:
+                                    continue
+
+                                # Check if should abandon (false alarm)
+                                if len(close_tag_buffer) > 15 or ('>' in close_tag_buffer and not any(close_lower.startswith(t[:len(close_lower)]) for t in ["</think>", "</thinking>"])):
+                                    # False alarm, back to buffering
+                                    thinking_buffer += close_tag_buffer
+                                    close_tag_buffer = ""
+                                    state = "BUFFERING_THINKING"
+                                continue
+
+                            # STATE: STREAMING_NORMAL
+                            elif state == "STREAMING_NORMAL":
+                                # Pass through directly
+                                yield json.dumps({
+                                    "model": display_name,
                                     "created_at": datetime.now().isoformat() + "Z",
                                     "message": {"role": "assistant", "content": content},
                                     "done": False
-                                }
-                                yield json.dumps(ollama_chunk) + '\n'
+                                }) + '\n'
 
-                    # Handle case where response was too short to trigger tag processing
-                    if not tag_processed and buffer:
-                        processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
-                        if processed_buffer:
-                            ollama_chunk = {
+                        # End of stream - flush any remaining buffered content
+                        if state == "DETECTING_OPEN_TAG" and buffer:
+                            yield json.dumps({
                                 "model": display_name,
                                 "created_at": datetime.now().isoformat() + "Z",
-                                "message": {"role": "assistant", "content": processed_buffer},
+                                "message": {"role": "assistant", "content": buffer},
                                 "done": False
-                            }
-                            yield json.dumps(ollama_chunk) + '\n'
+                            }) + '\n'
+                        elif state in ["BUFFERING_THINKING", "DETECTING_CLOSE_TAG"]:
+                            # Malformed - missing closing tag
+                            logger.warning(f"Stream ended while buffering thinking content for model '{model_id}'. No closing tag found.")
 
+                    else:
+                        # Feature disabled - simple pass-through
+                        for chunk in response_stream:
+                            if chunk.usage:
+                                prompt_tokens = chunk.usage.prompt_tokens
+                                completion_tokens = chunk.usage.completion_tokens
+
+                            if not chunk.choices:
+                                continue
+
+                            content = chunk.choices[0].delta.content
+                            if content:
+                                yield json.dumps({
+                                    "model": display_name,
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "message": {"role": "assistant", "content": content},
+                                    "done": False
+                                }) + '\n'
+
+                    # Final chunk with usage info
                     duration_ns = int((time.time() - start_time) * 1e9)
-                    final_response = create_final_response(display_name, prompt_tokens if prompt_tokens != -1 else 0, completion_tokens, duration_ns)
+                    final_response = create_final_response(
+                        display_name,
+                        prompt_tokens if prompt_tokens != -1 else 0,
+                        completion_tokens,
+                        duration_ns
+                    )
                     final_response["message"] = {"role": "assistant", "content": ""}
                     yield json.dumps(final_response) + '\n'
 
@@ -705,16 +825,10 @@ def generate():
             def generate_stream():
                 completion_tokens = 0
                 prompt_tokens = 0
-                full_response = ""
 
                 try:
                     # Get model configuration
                     openai_params, adapter_params = get_model_config(model_id)
-
-                    # Buffering for thinking tag removal
-                    buffer = ""
-                    tag_processed = False
-                    remove_tags = adapter_params.get('remove_thinking_tags', False)
 
                     # Prepare OpenAI API parameters
                     api_params = {
@@ -730,61 +844,183 @@ def generate():
                             api_params[key] = value
 
                     response_stream = client.chat.completions.create(**api_params)
-                    for chunk in response_stream:
-                        if chunk.usage:
-                            prompt_tokens = chunk.usage.prompt_tokens
-                            completion_tokens = chunk.usage.completion_tokens
 
-                        if not chunk.choices:
-                            continue
+                    # State machine for thinking tag removal
+                    remove_tags = adapter_params.get('remove_thinking_tags', False)
 
-                        content = chunk.choices[0].delta.content
-                        if content:
-                            full_response += content
+                    if remove_tags:
+                        # Initialize state machine
+                        state = "INITIAL"
+                        buffer = ""
+                        thinking_buffer = ""
+                        close_tag_buffer = ""
 
-                            if not tag_processed:
-                                # Buffer content until we can detect thinking tags
+                        for chunk in response_stream:
+                            # Track usage
+                            if chunk.usage:
+                                prompt_tokens = chunk.usage.prompt_tokens
+                                completion_tokens = chunk.usage.completion_tokens
+
+                            if not chunk.choices:
+                                continue
+
+                            content = chunk.choices[0].delta.content
+                            if not content:
+                                continue
+
+                            # STATE: INITIAL
+                            if state == "INITIAL":
+                                buffer = content
+                                state = "DETECTING_OPEN_TAG"
+                                continue
+
+                            # STATE: DETECTING_OPEN_TAG
+                            elif state == "DETECTING_OPEN_TAG":
                                 buffer += content
+                                buffer_lower = buffer.lstrip().lower()
 
-                                # Check if we have enough content to detect tags
-                                if len(buffer) >= 50 or '>' in buffer:
-                                    # Process buffer for thinking tags
-                                    processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
-                                    tag_processed = True
+                                # Check for opening tags
+                                found_tag = False
+                                for tag in ["<think>", "<thinking>"]:
+                                    if buffer_lower.startswith(tag):
+                                        # Found opening tag!
+                                        whitespace_len = len(buffer) - len(buffer.lstrip())
+                                        tag_end_pos = whitespace_len + len(tag)
+                                        buffer = buffer[tag_end_pos:]
+                                        thinking_buffer = ""
+                                        state = "BUFFERING_THINKING"
+                                        found_tag = True
+                                        logger.debug(f"Detected opening {tag} tag for model '{model_id}'")
+                                        break
 
-                                    # Yield processed buffer if not empty
-                                    if processed_buffer:
-                                        ollama_chunk = {
+                                if found_tag:
+                                    continue
+
+                                # Check if should abandon detection
+                                if len(buffer_lower) > 20 or (len(buffer.lstrip()) > 0 and buffer.lstrip()[0] != '<'):
+                                    # No tag present, switch to normal streaming
+                                    state = "STREAMING_NORMAL"
+                                    logger.debug(f"No thinking tag detected for model '{model_id}'")
+                                    if buffer:
+                                        yield json.dumps({
                                             "model": display_name,
                                             "created_at": datetime.now().isoformat() + "Z",
-                                            "response": processed_buffer,
+                                            "response": buffer,
                                             "done": False
-                                        }
-                                        yield json.dumps(ollama_chunk) + '\n'
-                            else:
-                                # Tags already processed, yield content immediately
-                                ollama_chunk = {
-                                    "model": display_name,  # BUGFIX: was undefined 'model', now use display_name
+                                        }) + '\n'
+                                        buffer = ""
+                                continue
+
+                            # STATE: BUFFERING_THINKING
+                            elif state == "BUFFERING_THINKING":
+                                buffer += content
+
+                                # Look for closing tag start
+                                if "</" in buffer:
+                                    close_idx = buffer.index("</")
+                                    thinking_buffer += buffer[:close_idx]
+                                    close_tag_buffer = buffer[close_idx:]
+                                    buffer = ""
+                                    state = "DETECTING_CLOSE_TAG"
+                                else:
+                                    # Keep buffering (move to thinking_buffer if getting large)
+                                    if len(buffer) > 1000:
+                                        thinking_buffer += buffer
+                                        buffer = ""
+                                continue
+
+                            # STATE: DETECTING_CLOSE_TAG
+                            elif state == "DETECTING_CLOSE_TAG":
+                                close_tag_buffer += content
+                                close_lower = close_tag_buffer.lower()
+
+                                # Check for complete closing tags
+                                found_close = False
+                                for tag in ["</think>", "</thinking>"]:
+                                    if close_lower.startswith(tag):
+                                        # Found closing tag!
+                                        remainder = close_tag_buffer[len(tag):].lstrip()
+
+                                        # Log removed content
+                                        preview = thinking_buffer[:100] + "..." if len(thinking_buffer) > 100 else thinking_buffer
+                                        logger.debug(f"Removed thinking tags from model '{model_id}'. Thinking content ({len(thinking_buffer)} chars): {preview}")
+
+                                        # Switch to normal streaming
+                                        state = "STREAMING_NORMAL"
+                                        thinking_buffer = ""
+                                        close_tag_buffer = ""
+                                        found_close = True
+
+                                        # Yield remainder if present
+                                        if remainder:
+                                            yield json.dumps({
+                                                "model": display_name,
+                                                "created_at": datetime.now().isoformat() + "Z",
+                                                "response": remainder,
+                                                "done": False
+                                            }) + '\n'
+                                        break
+
+                                if found_close:
+                                    continue
+
+                                # Check if should abandon (false alarm)
+                                if len(close_tag_buffer) > 15 or ('>' in close_tag_buffer and not any(close_lower.startswith(t[:len(close_lower)]) for t in ["</think>", "</thinking>"])):
+                                    # False alarm, back to buffering
+                                    thinking_buffer += close_tag_buffer
+                                    close_tag_buffer = ""
+                                    state = "BUFFERING_THINKING"
+                                continue
+
+                            # STATE: STREAMING_NORMAL
+                            elif state == "STREAMING_NORMAL":
+                                # Pass through directly
+                                yield json.dumps({
+                                    "model": display_name,
                                     "created_at": datetime.now().isoformat() + "Z",
                                     "response": content,
                                     "done": False
-                                }
-                                yield json.dumps(ollama_chunk) + '\n'
+                                }) + '\n'
 
-                    # Handle case where response was too short to trigger tag processing
-                    if not tag_processed and buffer:
-                        processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
-                        if processed_buffer:
-                            ollama_chunk = {
+                        # End of stream - flush any remaining buffered content
+                        if state == "DETECTING_OPEN_TAG" and buffer:
+                            yield json.dumps({
                                 "model": display_name,
                                 "created_at": datetime.now().isoformat() + "Z",
-                                "response": processed_buffer,
+                                "response": buffer,
                                 "done": False
-                            }
-                            yield json.dumps(ollama_chunk) + '\n'
+                            }) + '\n'
+                        elif state in ["BUFFERING_THINKING", "DETECTING_CLOSE_TAG"]:
+                            # Malformed - missing closing tag
+                            logger.warning(f"Stream ended while buffering thinking content for model '{model_id}'. No closing tag found.")
 
+                    else:
+                        # Feature disabled - simple pass-through
+                        for chunk in response_stream:
+                            if chunk.usage:
+                                prompt_tokens = chunk.usage.prompt_tokens
+                                completion_tokens = chunk.usage.completion_tokens
+
+                            if not chunk.choices:
+                                continue
+
+                            content = chunk.choices[0].delta.content
+                            if content:
+                                yield json.dumps({
+                                    "model": display_name,
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "response": content,
+                                    "done": False
+                                }) + '\n'
+
+                    # Final chunk with usage info
                     duration_ns = int((time.time() - start_time) * 1e9)
-                    final_response = create_final_response(display_name, prompt_tokens, completion_tokens, duration_ns)  # BUGFIX: was undefined 'model'
+                    final_response = create_final_response(
+                        display_name,
+                        prompt_tokens,
+                        completion_tokens,
+                        duration_ns
+                    )
                     final_response["response"] = ""
                     yield json.dumps(final_response) + '\n'
 
