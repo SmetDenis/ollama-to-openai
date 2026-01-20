@@ -23,26 +23,32 @@ logging:
 # Model configurations (optional)
 # If empty, all OpenAI models will be available with default settings
 # If specified, only these models will be exposed through the adapter
-# All parameters (except 'name') are passed directly to OpenAI API without validation
+# Each model entry supports:
+#   - name (required): OpenAI model identifier sent to API
+#   - custom_name (optional): Display name for clients (must be unique if specified)
+#   - All OpenAI API parameters (temperature, max_tokens, etc.) - passed through without validation
 models:
-  # Simple model name - no additional parameters
+  # Simple model name with custom display name
   - name: openai/gpt-4o-mini
+    custom_name: "GPT-4o Mini"
 
-  # Model with custom parameters - any OpenAI API parameters are supported
+  # Model with custom name and parameters - any OpenAI API parameters are supported
   - name: openai/gpt-4o
+    custom_name: "GPT-4o Latest"
     temperature: 0.7
     max_tokens: 2000
     top_p: 0.9
     frequency_penalty: 0.1
     presence_penalty: 0.2
 
-  # Model with response format (for structured outputs)
+  # Model with custom name and response format (for structured outputs)
   - name: openai/gpt-4o-2024-08-06
+    custom_name: "GPT-4o (Aug 2024)"
     temperature: 0.1
     response_format:
       type: "json_object"
 
-  # Model with advanced parameters
+  # Model with advanced parameters and NO custom_name (will use original name)
   - name: openai/gpt-3.5-turbo
     temperature: 0.5
     max_tokens: 1500

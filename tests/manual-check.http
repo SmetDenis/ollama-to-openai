@@ -170,8 +170,3 @@ POST http://localhost:11345/api/chat
 Accept: application/json
 Content-Type: application/json
 
-{
-    "model": "gpt-4o-mini",
-    "messages": [
-        "role": "user",
-        "content": "missing brace"

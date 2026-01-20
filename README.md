@@ -47,6 +47,35 @@ models:
     max_tokens: 2000
 ```
 
+### Model Name Mapping
+
+You can use custom display names for models while maintaining the correct OpenAI model IDs internally:
+
+```yaml
+models:
+  - name: openai/gpt-4o
+    custom_name: "GPT-4o"
+    temperature: 0.7
+
+  - name: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    custom_name: "Sonnet 4.5"
+```
+
+**Features:**
+- `custom_name` is optional - if not specified, the original OpenAI model name is used
+- `custom_name` must be unique across all models
+- Clients can use either the custom name OR the original name in requests
+- The adapter automatically maps custom names to OpenAI model IDs for API calls
+- Responses return the custom name to clients
+
+**Example request:**
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "Sonnet 4.5",
+  "messages": [{"role": "user", "content": "Hello"}]
+}'
+```
+
 ## Running
 
 ### Local Python
