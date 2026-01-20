@@ -26,6 +26,7 @@ logging:
 # Each model entry supports:
 #   - name (required): OpenAI model identifier sent to API
 #   - custom_name (optional): Display name for clients (must be unique if specified)
+#   - remove_thinking_tags (optional): Remove <think>/<thinking> tags from start of response (boolean, default: false)
 #   - All OpenAI API parameters (temperature, max_tokens, etc.) - passed through without validation
 models:
   # Simple model name with custom display name
@@ -40,6 +41,7 @@ models:
     top_p: 0.9
     frequency_penalty: 0.1
     presence_penalty: 0.2
+    remove_thinking_tags: true  # Remove <think> and <thinking> tags from response start
 
   # Model with custom name and response format (for structured outputs)
   - name: openai/gpt-4o-2024-08-06

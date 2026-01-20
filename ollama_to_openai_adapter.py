@@ -2,6 +2,7 @@ import sys
 import yaml
 import json
 import time
+import re
 import logging
 from functools import wraps
 from datetime import datetime
@@ -156,6 +157,45 @@ def log_endpoint(f):
             raise
 
     return decorated_function
+
+def remove_thinking_tags(content, model_id, remove_enabled):
+    """
+    Remove <think> or <thinking> tags from the beginning of content if enabled.
+    Logs removed thinking content at DEBUG level.
+
+    Args:
+        content: The content to process (may be None or empty)
+        model_id: Model identifier for logging
+        remove_enabled: Boolean indicating if tag removal is enabled
+
+    Returns:
+        Cleaned content or original content if no tags found
+    """
+    # Early return if feature is disabled or content is empty
+    if not remove_enabled or not content:
+        return content
+
+    # Regex pattern to match thinking tags at the beginning of content
+    # Pattern explanation:
+    # ^\s*          - Start of string with optional leading whitespace
+    # <think(?:ing)?>  - Match <think> or <thinking>
+    # (.*?)         - Capture content inside tags (non-greedy)
+    # </think(?:ing)?> - Match closing </think> or </thinking>
+    # \s*           - Optional trailing whitespace
+    pattern = r'^\s*<think(?:ing)?>(.*?)</think(?:ing)?>\s*'
+
+    match = re.match(pattern, content, re.DOTALL | re.IGNORECASE)
+    if match:
+        thinking_content = match.group(1)
+        cleaned_content = content[match.end():]
+
+        # Log removed thinking content (first 100 chars) at DEBUG level
+        thinking_preview = thinking_content[:100] + "..." if len(thinking_content) > 100 else thinking_content
+        logger.debug(f"Removed thinking tags from model '{model_id}'. Thinking content ({len(thinking_content)} chars): {thinking_preview}")
+
+        return cleaned_content
+
+    return content
 
 def load_config(path='config.yml'):
     """Loads and validates YAML configuration file."""
@@ -398,17 +438,22 @@ def show_model():
 
 def get_model_config(model_id):
     """
-    Returns model configuration with all parameters from config.
+    Returns model configuration split into OpenAI and adapter parameters.
     Works with models list format: [{name: "model-name", temperature: 0.7, max_tokens: 1000}, ...]
-    Passes through any parameters found in config without validation or defaults.
+    Passes through OpenAI parameters without validation.
     Supports both custom_name and original model names.
 
     Args:
         model_id: Model name (custom_name or original)
 
     Returns:
-        dict with model parameters (WITHOUT 'name' and 'custom_name')
+        tuple: (openai_params, adapter_params)
+            - openai_params: dict with parameters for OpenAI API (includes model_id)
+            - adapter_params: dict with adapter-specific parameters (remove_thinking_tags, etc.)
     """
+    # Define adapter-specific parameters that should not be sent to OpenAI
+    ADAPTER_PARAMS = {'remove_thinking_tags'}
+
     # Check for model-specific configuration in config
     models_config = CONFIG.get('models', [])
 
@@ -424,14 +469,26 @@ def get_model_config(model_id):
 
     if model_entry is None:
         # Model not in config, return empty parameters
-        return {'model_id': original_name}
+        return {'model_id': original_name}, {}
     else:
-        # Model found, return all parameters except 'name' and 'custom_name'
-        # CRITICAL: Exclude 'name' and 'custom_name' from parameters sent to OpenAI
-        config_params = {k: v for k, v in model_entry.items()
-                        if k not in ('name', 'custom_name')}
-        config_params['model_id'] = original_name  # Always use original name
-        return config_params
+        # Model found, split parameters into OpenAI and adapter params
+        # CRITICAL: Exclude 'name' and 'custom_name' from both dicts
+        openai_params = {}
+        adapter_params = {}
+
+        for k, v in model_entry.items():
+            if k in ('name', 'custom_name'):
+                # Skip these fields entirely
+                continue
+            elif k in ADAPTER_PARAMS:
+                # Adapter-specific parameter
+                adapter_params[k] = v
+            else:
+                # OpenAI API parameter
+                openai_params[k] = v
+
+        openai_params['model_id'] = original_name  # Always use original name
+        return openai_params, adapter_params
 
 def create_final_response(model_name, prompt_tokens, completion_tokens, total_duration_ns):
     """
@@ -487,7 +544,12 @@ def chat():
 
                 try:
                     # Get model configuration
-                    model_config = get_model_config(model_id)
+                    openai_params, adapter_params = get_model_config(model_id)
+
+                    # Buffering for thinking tag removal
+                    buffer = ""
+                    tag_processed = False
+                    remove_tags = adapter_params.get('remove_thinking_tags', False)
 
                     # Prepare OpenAI API parameters
                     api_params = {
@@ -498,7 +560,7 @@ def chat():
                     }
 
                     # Add all model-specific parameters from config
-                    for key, value in model_config.items():
+                    for key, value in openai_params.items():
                         if key != 'model_id':  # Skip our internal field
                             api_params[key] = value
 
@@ -512,10 +574,43 @@ def chat():
                             continue
                         content = chunk.choices[0].delta.content
                         if content:
+                            if not tag_processed:
+                                # Buffer content until we can detect thinking tags
+                                buffer += content
+
+                                # Check if we have enough content to detect tags
+                                if len(buffer) >= 50 or '>' in buffer:
+                                    # Process buffer for thinking tags
+                                    processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
+                                    tag_processed = True
+
+                                    # Yield processed buffer if not empty
+                                    if processed_buffer:
+                                        ollama_chunk = {
+                                            "model": display_name,
+                                            "created_at": datetime.now().isoformat() + "Z",
+                                            "message": {"role": "assistant", "content": processed_buffer},
+                                            "done": False
+                                        }
+                                        yield json.dumps(ollama_chunk) + '\n'
+                            else:
+                                # Tags already processed, yield content immediately
+                                ollama_chunk = {
+                                    "model": display_name,  # Return display name to client
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "message": {"role": "assistant", "content": content},
+                                    "done": False
+                                }
+                                yield json.dumps(ollama_chunk) + '\n'
+
+                    # Handle case where response was too short to trigger tag processing
+                    if not tag_processed and buffer:
+                        processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
+                        if processed_buffer:
                             ollama_chunk = {
-                                "model": display_name,  # Return display name to client
+                                "model": display_name,
                                 "created_at": datetime.now().isoformat() + "Z",
-                                "message": {"role": "assistant", "content": content},
+                                "message": {"role": "assistant", "content": processed_buffer},
                                 "done": False
                             }
                             yield json.dumps(ollama_chunk) + '\n'
@@ -530,7 +625,7 @@ def chat():
 
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
-            model_config = get_model_config(model_id)
+            openai_params, adapter_params = get_model_config(model_id)
 
             # Prepare OpenAI API parameters
             api_params = {
@@ -540,7 +635,7 @@ def chat():
             }
 
             # Add all model-specific parameters from config
-            for key, value in model_config.items():
+            for key, value in openai_params.items():
                 if key != 'model_id':  # Skip our internal field
                     api_params[key] = value
 
@@ -556,9 +651,17 @@ def chat():
             if not response.choices:
                 return jsonify({"error": "No response choices returned from OpenAI"}), 500
 
+            # Remove thinking tags if enabled
+            raw_content = response.choices[0].message.content
+            cleaned_content = remove_thinking_tags(
+                raw_content,
+                model_id,
+                adapter_params.get('remove_thinking_tags', False)
+            )
+
             final_response["message"] = {
                 "role": "assistant",
-                "content": response.choices[0].message.content
+                "content": cleaned_content
             }
             return jsonify(final_response)
 
@@ -606,7 +709,12 @@ def generate():
 
                 try:
                     # Get model configuration
-                    model_config = get_model_config(model_id)
+                    openai_params, adapter_params = get_model_config(model_id)
+
+                    # Buffering for thinking tag removal
+                    buffer = ""
+                    tag_processed = False
+                    remove_tags = adapter_params.get('remove_thinking_tags', False)
 
                     # Prepare OpenAI API parameters
                     api_params = {
@@ -617,7 +725,7 @@ def generate():
                     }
 
                     # Add all model-specific parameters from config
-                    for key, value in model_config.items():
+                    for key, value in openai_params.items():
                         if key != 'model_id':  # Skip our internal field
                             api_params[key] = value
 
@@ -633,10 +741,44 @@ def generate():
                         content = chunk.choices[0].delta.content
                         if content:
                             full_response += content
+
+                            if not tag_processed:
+                                # Buffer content until we can detect thinking tags
+                                buffer += content
+
+                                # Check if we have enough content to detect tags
+                                if len(buffer) >= 50 or '>' in buffer:
+                                    # Process buffer for thinking tags
+                                    processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
+                                    tag_processed = True
+
+                                    # Yield processed buffer if not empty
+                                    if processed_buffer:
+                                        ollama_chunk = {
+                                            "model": display_name,
+                                            "created_at": datetime.now().isoformat() + "Z",
+                                            "response": processed_buffer,
+                                            "done": False
+                                        }
+                                        yield json.dumps(ollama_chunk) + '\n'
+                            else:
+                                # Tags already processed, yield content immediately
+                                ollama_chunk = {
+                                    "model": display_name,  # BUGFIX: was undefined 'model', now use display_name
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "response": content,
+                                    "done": False
+                                }
+                                yield json.dumps(ollama_chunk) + '\n'
+
+                    # Handle case where response was too short to trigger tag processing
+                    if not tag_processed and buffer:
+                        processed_buffer = remove_thinking_tags(buffer, model_id, remove_tags)
+                        if processed_buffer:
                             ollama_chunk = {
-                                "model": display_name,  # BUGFIX: was undefined 'model', now use display_name
+                                "model": display_name,
                                 "created_at": datetime.now().isoformat() + "Z",
-                                "response": content,
+                                "response": processed_buffer,
                                 "done": False
                             }
                             yield json.dumps(ollama_chunk) + '\n'
@@ -651,7 +793,7 @@ def generate():
 
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
-            model_config = get_model_config(model_id)
+            openai_params, adapter_params = get_model_config(model_id)
 
             # Prepare OpenAI API parameters
             api_params = {
@@ -661,7 +803,7 @@ def generate():
             }
 
             # Add all model-specific parameters from config
-            for key, value in model_config.items():
+            for key, value in openai_params.items():
                 if key != 'model_id':  # Skip our internal field
                     api_params[key] = value
 
@@ -677,7 +819,16 @@ def generate():
                 response.usage.completion_tokens,
                 duration_ns
             )
-            final_response["response"] = response.choices[0].message.content
+
+            # Remove thinking tags if enabled
+            raw_content = response.choices[0].message.content
+            cleaned_content = remove_thinking_tags(
+                raw_content,
+                model_id,
+                adapter_params.get('remove_thinking_tags', False)
+            )
+
+            final_response["response"] = cleaned_content
             return jsonify(final_response)
 
     except Exception as e:
