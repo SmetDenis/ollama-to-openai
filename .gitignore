@@ -210,3 +210,4 @@ __marimo__/
 .idea
 config.yml
 .claude
+prompts/*.md

@@ -15,45 +15,119 @@ openai:
   # Useful for OpenAI-compatible APIs like Azure OpenAI, local LLMs, etc.
   # base_url: "https://your-custom-openai-endpoint.com/v1"
 
+# Client IP groups (optional)
+# Named groups of IP addresses for use in model ip_routing rules
+# Values can be a single IP string or a list of IP strings
+# The adapter checks X-Forwarded-For, X-Real-IP headers for real client IP
+# clients:
+#   office:
+#     - "192.168.1.100"
+#     - "192.168.1.101"
+#   home:
+#     - "10.0.0.5"
+#   mobile: "172.16.0.10"
+
 # Logging configuration (optional)
 logging:
   log_level: "WARNING"    # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
   log_requests: false     # Whether to log request/response details
 
+# Tracing configuration (optional)
+# Request tracing, correlation IDs, and LiteLLM proxy header integration
+# When enabled, each request gets a unique request_id and trace_id visible in logs
+# If absent or enabled=false, tracing is completely off (zero overhead)
+# tracing:
+#   enabled: true                      # Master switch for all tracing features
+#   log_headers: true                  # Extract and log LiteLLM response headers (cost, duration, model-id)
+#                                      # Uses OpenAI SDK with_raw_response / with_streaming_response
+#   send_trace_headers: true           # Send x-litellm-trace-id, x-litellm-call-id, metadata to LiteLLM proxy
+#                                      # Also sends adapter_model (custom_name) via spend-logs-metadata and body metadata
+#   trace_id_prefix: "oa"             # Prefix for auto-generated trace IDs (default: "oa")
+#   tags: "ollama-adapter,production"  # Comma-separated tags sent as x-litellm-tags header
+
 # Model configurations (optional)
 # If empty, all OpenAI models will be available with default settings
 # If specified, only these models will be exposed through the adapter
-# Each model entry supports:
-#   - name (required): OpenAI model identifier sent to API
-#   - custom_name (optional): Display name for clients (must be unique if specified)
-#   - remove_thinking_tags (optional): Remove <think>/<thinking> tags from start of response (boolean, default: false)
-#   - All OpenAI API parameters (temperature, max_tokens, etc.) - passed through without validation
+#
+# Each model entry has two levels:
+#   Root level (proxy settings):
+#     - name (required): OpenAI model identifier sent to API
+#     - custom_name (optional): Display name for clients (must be unique if specified)
+#     - remove_thinking_tags (optional): Remove <think>/<thinking> tags from response start (boolean, default: false)
+#     - prompt_caching (optional): Enable provider-side prompt caching for system prompts (boolean, default: false)
+#       Adds cache_control markers to system message, enabling caching on Anthropic and
+#       Google Gemini (via LiteLLM). OpenAI caching is automatic and unaffected.
+#     - system_prompt (optional): System prompt - inline string or path to .md file
+#       If value ends with '.md', reads from file (relative to CWD) on each request
+#       Overrides any system message in client requests
+#   params (optional): OpenAI API parameters - passed through as-is without validation
+#     Supports any OpenAI parameter including nested structures (dicts, arrays)
+#   headers (optional): Extra HTTP headers added to OpenAI API requests for this model
+#   ip_routing (optional): List of IP-specific overrides for this model
+#     Each entry has 'ip' (client alias from 'clients' section or direct IP) plus
+#     optional overrides: name, params, headers, system_prompt, remove_thinking_tags
+#     Unspecified fields inherit from the parent model entry
+#     Dict fields (params, headers) are shallow-merged with parent values
 models:
-  # Simple model name with custom display name
+  # Minimal model - only name required
   - name: openai/gpt-4o-mini
     custom_name: "GPT-4o Mini"
+    system_prompt: "You are a helpful coding assistant."
 
-  # Model with custom name and parameters - any OpenAI API parameters are supported
+  # Model with params and proxy settings
   - name: openai/gpt-4o
     custom_name: "GPT-4o Latest"
-    temperature: 0.7
-    max_tokens: 2000
-    top_p: 0.9
-    frequency_penalty: 0.1
-    presence_penalty: 0.2
-    remove_thinking_tags: true  # Remove <think> and <thinking> tags from response start
+    remove_thinking_tags: true
+    prompt_caching: true
+    system_prompt: "prompts/assistant.md"
+    params:
+      temperature: 0.7
+      max_tokens: 2000
+      top_p: 0.9
+      frequency_penalty: 0.1
+      presence_penalty: 0.2
 
-  # Model with custom name and response format (for structured outputs)
+  # Model with nested params (response format, arrays, etc.)
   - name: openai/gpt-4o-2024-08-06
     custom_name: "GPT-4o (Aug 2024)"
-    temperature: 0.1
-    response_format:
-      type: "json_object"
+    params:
+      temperature: 0.1
+      response_format:
+        type: "json_object"
 
-  # Model with advanced parameters and NO custom_name (will use original name)
+  # Model with advanced params and NO custom_name (will use original name)
   - name: openai/gpt-3.5-turbo
-    temperature: 0.5
-    max_tokens: 1500
-    stop: ["END", "STOP"]
-    logit_bias:
-      "50256": -100  # Suppress specific token
+    params:
+      temperature: 0.5
+      max_tokens: 1500
+      stop: ["END", "STOP"]
+      logit_bias:
+        "50256": -100
+
+  # Model with IP-based routing (requires 'clients' section above)
+  # Different clients (by IP) are routed to different backend models
+  # Fields not specified in ip_routing inherit from the parent model entry
+  # - name: openai/gpt-4o
+  #   custom_name: "Smart Assistant"
+  #   system_prompt: "You are a helpful assistant."
+  #   params:
+  #     temperature: 0.7
+  #   ip_routing:
+  #     - ip: "office"                   # reference to clients alias
+  #       name: openai/gpt-4o-mini
+  #       params:
+  #         temperature: 0.3
+  #     - ip: "home"                     # another alias
+  #       params:
+  #         temperature: 0.9
+  #     - ip: "172.16.0.99"             # direct IP also works
+  #       name: openai/gpt-3.5-turbo
+
+  # Model with custom HTTP headers (e.g. for custom providers)
+  # - name: custom-provider/model-v1
+  #   custom_name: "Custom Model"
+  #   params:
+  #     temperature: 0.3
+  #   headers:
+  #     X-Custom-Auth: "token-value"
+  #     X-Provider-Version: "2024-01"

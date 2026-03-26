@@ -63,10 +63,18 @@ The `config.yml` file contains:
 - `openai.base_url`: Custom OpenAI endpoint URL (optional, for Azure OpenAI, local LLMs, etc.)
 - `logging.log_level`: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 - `logging.log_requests`: Enable/disable detailed request/response logging
-- `models`: List of model configurations with full parameter support:
-  - `name`: Model identifier (required)
-  - All OpenAI API parameters supported (temperature, max_tokens, top_p, frequency_penalty, presence_penalty, response_format, stop, logit_bias, etc.)
-  - Parameters are passed through to OpenAI API without validation
+- `clients` (optional): Named IP groups (aliases) mapping to lists of IP addresses, used in `ip_routing` rules
+- `tracing` (optional): Request tracing and LiteLLM proxy integration
+  - `enabled`: Master switch (default: false). When true, each request gets unique request_id and trace_id in logs
+  - `log_headers`: Extract LiteLLM response headers (cost, duration, model-id) using OpenAI SDK with_raw_response/with_streaming_response
+  - `send_trace_headers`: Send x-litellm-trace-id, x-litellm-call-id, adapter_model (display name) to LiteLLM proxy
+  - `trace_id_prefix`: Prefix for auto-generated trace IDs (default: "oa")
+  - `tags`: Comma-separated tags sent as x-litellm-tags header
+- `models`: List of model configurations with two-level structure:
+  - Root level (proxy settings): `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt`
+  - `params` (optional): OpenAI API parameters dict — passed through as-is without validation (supports nested structures)
+  - `headers` (optional): Extra HTTP headers dict — added to OpenAI API requests for this model
+  - `ip_routing` (optional): List of IP-specific overrides. Each entry has `ip` (alias from `clients` or direct IP), plus optional `name`, `params`, `headers`, `system_prompt`, `remove_thinking_tags`, `prompt_caching`. Unspecified fields inherit from parent model. Dict fields (params, headers) are shallow-merged.
 
 ## Key Implementation Details
 
@@ -74,10 +82,13 @@ The `config.yml` file contains:
 - **Error Handling**: Configuration validation on startup, comprehensive input validation with descriptive error messages for all endpoints
 - **Response Format**: All responses follow Ollama API specifications with proper timing (total_duration, eval_duration, load_duration) and token usage data
 - **Streaming**: Uses Flask's `stream_with_context` for real-time NDJSON streaming in chat and generation endpoints
-- **Parameter Flexibility**: All OpenAI API parameters can be configured per model in config.yml and are passed through without validation
+- **Parameter Flexibility**: OpenAI API parameters are configured per model under `params:` key and passed through without validation; per-model HTTP headers via `headers:` key
+- **Prompt Caching**: Provider-side prompt caching via `prompt_caching: true` flag. Injects `cache_control` markers into system message content blocks, enabling caching on Anthropic and Google Gemini through LiteLLM. OpenAI caching is automatic and unaffected by this flag
+- **IP Routing**: Per-model IP-based routing with named client groups (`clients` section). Different clients can be routed to different backend models with different parameters. Client IP detection supports X-Forwarded-For and X-Real-IP headers for reverse proxy setups
 - **Debug Mode**: Flask runs in debug mode with auto-reload and stat-based reloader for development
 - **Complete API Coverage**: Full Ollama API compatibility including chat, generate, embed, tags, show, version, ps, health endpoints
 - **Logging**: Request/response logging with performance tracking, configurable detail levels, and error tracking
+- **Tracing**: Optional LiteLLM proxy integration via `tracing` config section. Generates request_id/trace_id per request, forwards x-litellm-* headers, extracts response headers (cost, duration, model-id). Sends adapter_model (custom_name) via x-litellm-spend-logs-metadata header and body metadata for LiteLLM UI and Langfuse visibility. Supports incoming x-litellm-trace-id passthrough from clients. When enabled, log format includes [request_id|trace_id] context
 - **Health Monitoring**: Health endpoint checks OpenAI connectivity and reports cached model count
 
 ## Testing

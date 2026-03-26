@@ -3,14 +3,33 @@ import yaml
 import json
 import time
 import re
+import os
+import uuid
 import logging
 from functools import wraps
 from datetime import datetime
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, g
 from openai import OpenAI
 
 # Will configure logging after loading config
 logger = logging.getLogger(__name__)
+
+
+class TraceContextFilter(logging.Filter):
+    """Injects request_id|trace_id into log records when inside a Flask request."""
+    def filter(self, record):
+        try:
+            req_id = getattr(g, 'request_id', None)
+            trace_id = getattr(g, 'trace_id', None)
+            if req_id and trace_id:
+                record.trace_context = f"{req_id}|{trace_id}"
+            elif req_id:
+                record.trace_context = req_id
+            else:
+                record.trace_context = "-"
+        except RuntimeError:
+            record.trace_context = "-"
+        return True
 
 # --- Input validation helpers ---
 
@@ -36,6 +55,21 @@ def validate_model_parameter(data):
 
     return model.strip(), None
 
+# --- Client IP detection ---
+
+def get_client_ip():
+    """Determine the real client IP address from the request.
+    Checks X-Forwarded-For (first IP), then X-Real-IP, then request.remote_addr."""
+    forwarded_for = request.headers.get('X-Forwarded-For')
+    if forwarded_for:
+        client_ip = forwarded_for.split(',')[0].strip()
+        if client_ip:
+            return client_ip
+    real_ip = request.headers.get('X-Real-IP')
+    if real_ip:
+        return real_ip.strip()
+    return request.remote_addr
+
 # --- Logging helpers ---
 
 def log_request(endpoint, method, data=None):
@@ -46,7 +80,7 @@ def log_request(endpoint, method, data=None):
     log_data = {
         "endpoint": endpoint,
         "method": method,
-        "client_ip": request.remote_addr,
+        "client_ip": get_client_ip(),
         "user_agent": request.headers.get('User-Agent', 'Unknown')
     }
 
@@ -158,6 +192,110 @@ def log_endpoint(f):
 
     return decorated_function
 
+# --- Tracing helpers ---
+
+LITELLM_RESPONSE_HEADERS = [
+    'x-litellm-call-id',
+    'x-litellm-model-id',
+    'x-litellm-model-api-base',
+    'x-litellm-response-cost',
+    'x-litellm-response-duration-ms',
+    'x-litellm-overhead-duration-ms',
+    'x-litellm-version',
+]
+
+
+def _tracing_enabled():
+    """Check if the tracing master switch is on."""
+    return CONFIG.get('tracing', {}).get('enabled', False)
+
+
+def _tracing_log_headers_enabled():
+    """Check if LiteLLM response header extraction is enabled."""
+    tracing = CONFIG.get('tracing', {})
+    return tracing.get('enabled', False) and tracing.get('log_headers', False)
+
+
+def build_trace_headers(extra_headers, display_name=None):
+    """Merge LiteLLM tracing headers into extra_headers.
+    Model-specific headers take precedence over tracing headers.
+    display_name is sent via x-litellm-spend-logs-metadata for cost tracking."""
+    tracing = CONFIG.get('tracing', {})
+    if not tracing.get('enabled', False) or not tracing.get('send_trace_headers', False):
+        return extra_headers
+
+    trace_headers = {}
+    trace_id = getattr(g, 'trace_id', None)
+    request_id = getattr(g, 'request_id', None)
+
+    if trace_id:
+        trace_headers['x-litellm-trace-id'] = trace_id
+    if request_id:
+        trace_headers['x-litellm-call-id'] = request_id
+
+    tags = tracing.get('tags', '')
+    if tags:
+        trace_headers['x-litellm-tags'] = tags
+
+    if display_name:
+        trace_headers['x-litellm-spend-logs-metadata'] = json.dumps({"adapter_model": display_name})
+
+    if not trace_headers:
+        return extra_headers
+
+    merged = dict(trace_headers)
+    if extra_headers:
+        merged.update(extra_headers)
+    return merged
+
+
+def build_trace_body_metadata(display_name=None):
+    """Return metadata dict for the request body (trace_name for Langfuse, adapter_model for LiteLLM UI)."""
+    tracing = CONFIG.get('tracing', {})
+    if not tracing.get('enabled', False) or not tracing.get('send_trace_headers', False):
+        return None
+    if not display_name:
+        return None
+    return {"trace_name": display_name, "adapter_model": display_name}
+
+
+def _capture_litellm_headers(headers):
+    """Extract LiteLLM response headers into g.litellm_response_headers."""
+    captured = {}
+    for h in LITELLM_RESPONSE_HEADERS:
+        value = headers.get(h)
+        if value is not None:
+            captured[h] = value
+    try:
+        g.litellm_response_headers = captured
+    except RuntimeError:
+        pass
+
+
+def _log_litellm_headers():
+    """Log captured LiteLLM headers: compact at INFO, full at DEBUG."""
+    try:
+        headers = getattr(g, 'litellm_response_headers', {})
+    except RuntimeError:
+        return
+    if not headers:
+        return
+    parts = []
+    if 'x-litellm-model-id' in headers:
+        parts.append(f"model_id={headers['x-litellm-model-id']}")
+    if 'x-litellm-response-cost' in headers:
+        parts.append(f"cost=${headers['x-litellm-response-cost']}")
+    if 'x-litellm-response-duration-ms' in headers:
+        parts.append(f"llm_duration={headers['x-litellm-response-duration-ms']}ms")
+    if 'x-litellm-overhead-duration-ms' in headers:
+        parts.append(f"overhead={headers['x-litellm-overhead-duration-ms']}ms")
+    if 'x-litellm-call-id' in headers:
+        parts.append(f"litellm_call_id={headers['x-litellm-call-id']}")
+    if parts:
+        logger.info(f"LiteLLM: {' '.join(parts)}")
+    logger.debug(f"LiteLLM response headers: {headers}")
+
+
 def remove_thinking_tags(content, model_id, remove_enabled):
     """
     Remove <think> or <thinking> tags from the beginning of content if enabled.
@@ -197,17 +335,142 @@ def remove_thinking_tags(content, model_id, remove_enabled):
 
     return content
 
-def load_config(path='config.yml'):
-    """Loads and validates YAML configuration file."""
+def resolve_system_prompt(value):
+    """
+    Resolve system_prompt value to actual prompt text.
+    If value ends with '.md', reads content from file (relative to CWD).
+    Otherwise returns the string as-is.
+
+    Args:
+        value: System prompt string or path to .md file
+
+    Returns:
+        Resolved prompt text, or None if empty
+
+    Raises:
+        FileNotFoundError: If .md file does not exist
+        IOError: If .md file cannot be read
+    """
+    if not value or not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    if not value:
+        return None
+
+    if value.endswith('.md'):
+        file_path = value if os.path.isabs(value) else os.path.join(os.getcwd(), value)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        return content if content else None
+
+    return value
+
+def apply_system_prompt(messages, adapter_params, model_id):
+    """
+    Apply system prompt from model config to messages list.
+    If config has system_prompt and request has system message — replaces it.
+    If config has system_prompt and request has no system message — prepends it.
+    If config has no system_prompt — returns messages unchanged.
+
+    Args:
+        messages: List of message dicts (role/content)
+        adapter_params: Adapter parameters from model config
+        model_id: Model identifier for logging
+
+    Returns:
+        New list of messages (shallow copy, original not mutated)
+    """
+    system_prompt_value = adapter_params.get('system_prompt')
+    if not system_prompt_value:
+        return messages
+
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+        resolved = resolve_system_prompt(system_prompt_value)
     except FileNotFoundError:
-        logger.error(f"Configuration file '{path}' not found")
-        exit(1)
-    except yaml.YAMLError as e:
-        logger.error(f"YAML parsing error in file '{path}': {e}")
-        exit(1)
+        logger.error(f"System prompt file not found for model '{model_id}': {system_prompt_value}")
+        return messages
+    except Exception as e:
+        logger.error(f"Failed to read system prompt for model '{model_id}': {e}")
+        return messages
+
+    if not resolved:
+        return messages
+
+    result = list(messages)
+    system_msg = {"role": "system", "content": resolved}
+
+    # Find existing system message index
+    system_idx = None
+    for i, msg in enumerate(result):
+        if isinstance(msg, dict) and msg.get('role') == 'system':
+            system_idx = i
+            break
+
+    if system_idx is not None:
+        result[system_idx] = system_msg
+        logger.debug(f"Replaced system message for model '{model_id}' with config system_prompt")
+    else:
+        result.insert(0, system_msg)
+        logger.debug(f"Prepended system message for model '{model_id}' from config system_prompt")
+
+    return result
+
+def apply_prompt_caching(messages, adapter_params, model_id):
+    """
+    Add cache_control markers to system message content for provider-side prompt caching.
+
+    Transforms system message content from string to array-of-blocks format
+    with cache_control annotation. Enables prompt caching on Anthropic and
+    Google Gemini via LiteLLM. OpenAI caching is automatic and unaffected.
+
+    Transform:
+        {"role": "system", "content": "text"}
+    Into:
+        {"role": "system", "content": [{"type": "text", "text": "text",
+         "cache_control": {"type": "ephemeral"}}]}
+
+    Args:
+        messages: List of message dicts (role/content)
+        adapter_params: Adapter parameters from model config
+        model_id: Model identifier for logging
+
+    Returns:
+        New list of messages (shallow copy, original not mutated)
+    """
+    if not adapter_params.get('prompt_caching'):
+        return messages
+
+    result = list(messages)
+
+    for i, msg in enumerate(result):
+        if not isinstance(msg, dict) or msg.get('role') != 'system':
+            continue
+
+        content = msg.get('content')
+        if not content or not isinstance(content, str):
+            continue
+
+        result[i] = {
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"}
+            }]
+        }
+        logger.debug(
+            f"Added cache_control to system message for model '{model_id}' "
+            f"({len(content)} chars)"
+        )
+        break  # Only cache the first system message
+
+    return result
+
+def load_config(path='config.yml'):
+    """Loads and validates YAML configuration file. Raises on any error."""
+    with open(path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
 
     if not config.get('openai', {}).get('api_key'):
         raise ValueError("Missing required parameter 'openai.api_key' in config.yml")
@@ -216,31 +479,146 @@ def load_config(path='config.yml'):
     if not config.get('server', {}).get('port'):
         raise ValueError("Missing required parameter 'server.port' in config.yml")
 
-    # Validate custom_name uniqueness
+    # Normalize custom_name values (strip whitespace)
     models_config = config.get('models', [])
+    if models_config:
+        for model in models_config:
+            if isinstance(model, dict) and 'custom_name' in model:
+                model['custom_name'] = model['custom_name'].strip()
+
+    # Validate custom_name uniqueness
     if models_config:
         custom_names = []
         for model in models_config:
             if isinstance(model, dict) and 'custom_name' in model:
                 custom_names.append(model['custom_name'])
 
-        # Check for duplicates
         duplicates = [name for name in set(custom_names) if custom_names.count(name) > 1]
         if duplicates:
-            logger.error(f"Duplicate custom_name values found: {duplicates}")
-            sys.exit(1)
+            raise ValueError(f"Duplicate custom_name values found: {duplicates}")
+
+    # Validate clients section
+    clients_config = config.get('clients')
+    if clients_config is not None:
+        if not isinstance(clients_config, dict):
+            raise ValueError("'clients' must be a dict mapping alias names to IP addresses")
+        for alias, ips in clients_config.items():
+            if isinstance(ips, str):
+                if not ips.strip():
+                    raise ValueError(f"Client alias '{alias}': IP address cannot be empty")
+                clients_config[alias] = ips.strip()
+            elif isinstance(ips, list):
+                if not ips:
+                    raise ValueError(f"Client alias '{alias}': IP list cannot be empty")
+                for i, ip in enumerate(ips):
+                    if not isinstance(ip, str) or not ip.strip():
+                        raise ValueError(f"Client alias '{alias}': ip[{i}] must be a non-empty string")
+                clients_config[alias] = [ip.strip() for ip in ips]
+            else:
+                raise ValueError(f"Client alias '{alias}': value must be a string or list of strings")
+
+    # Validate ip_routing in model entries
+    if models_config:
+        for idx, model in enumerate(models_config):
+            if not isinstance(model, dict):
+                continue
+            ip_routing = model.get('ip_routing')
+            if ip_routing is None:
+                continue
+
+            model_display = model.get('custom_name') or model.get('name', f'models[{idx}]')
+
+            if not isinstance(ip_routing, list):
+                raise ValueError(f"Model '{model_display}': 'ip_routing' must be a list")
+
+            seen_ips = set()
+            for rule_idx, rule in enumerate(ip_routing):
+                if not isinstance(rule, dict):
+                    raise ValueError(
+                        f"Model '{model_display}': ip_routing[{rule_idx}] must be a dict")
+
+                ip_value = rule.get('ip')
+                if not ip_value or not isinstance(ip_value, str) or not ip_value.strip():
+                    raise ValueError(
+                        f"Model '{model_display}': ip_routing[{rule_idx}] "
+                        f"must have a non-empty 'ip' field (alias name or direct IP)")
+
+                ip_value = ip_value.strip()
+                rule['ip'] = ip_value
+
+                # Resolve to actual IPs for duplicate checking
+                if clients_config and ip_value in clients_config:
+                    resolved = clients_config[ip_value]
+                    resolved_ips = [resolved] if isinstance(resolved, str) else resolved
+                else:
+                    resolved_ips = [ip_value]
+
+                for ip in resolved_ips:
+                    if ip in seen_ips:
+                        raise ValueError(
+                            f"Model '{model_display}': duplicate IP '{ip}' in ip_routing")
+                    seen_ips.add(ip)
+
+                if 'params' in rule and rule['params'] is not None:
+                    if not isinstance(rule['params'], dict):
+                        raise ValueError(
+                            f"Model '{model_display}': ip_routing[{rule_idx}] 'params' must be a dict")
+
+                if 'headers' in rule and rule['headers'] is not None:
+                    if not isinstance(rule['headers'], dict):
+                        raise ValueError(
+                            f"Model '{model_display}': ip_routing[{rule_idx}] 'headers' must be a dict")
+
+    # Validate tracing section
+    tracing_config = config.get('tracing')
+    if tracing_config is not None:
+        if not isinstance(tracing_config, dict):
+            raise ValueError("'tracing' must be a dict")
+        for flag in ('enabled', 'log_headers', 'send_trace_headers'):
+            if flag in tracing_config and not isinstance(tracing_config[flag], bool):
+                raise ValueError(f"tracing.{flag} must be a boolean (true/false)")
+        for field in ('trace_id_prefix', 'tags'):
+            if field in tracing_config and not isinstance(tracing_config[field], str):
+                raise ValueError(f"tracing.{field} must be a string")
 
     return config
 
-CONFIG = load_config()
 
-# Configure logging based on config
-log_level = getattr(logging, CONFIG.get('logging', {}).get('log_level', 'INFO').upper(), logging.INFO)
-logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
+try:
+    CONFIG = load_config()
+except Exception as e:
+    logger.error(f"Failed to load config: {e}")
+    sys.exit(1)
+
+def _configure_log_format(config):
+    """Configure log format and filters based on tracing config.
+    When tracing is enabled, adds [request_id|trace_id] to every log line."""
+    root_logger = logging.getLogger()
+    log_level = getattr(logging, config.get('logging', {}).get('log_level', 'INFO').upper(), logging.INFO)
+    root_logger.setLevel(log_level)
+
+    tracing_on = config.get('tracing', {}).get('enabled', False)
+
+    if tracing_on:
+        fmt = '%(asctime)s - %(levelname)s - [%(trace_context)s] %(message)s'
+    else:
+        fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+    formatter = logging.Formatter(fmt)
+
+    if not root_logger.handlers:
+        handler = logging.StreamHandler()
+        root_logger.addHandler(handler)
+
+    for handler in root_logger.handlers:
+        handler.setFormatter(formatter)
+        # Remove existing TraceContextFilter instances before adding
+        handler.filters = [f for f in handler.filters if not isinstance(f, TraceContextFilter)]
+        if tracing_on:
+            handler.addFilter(TraceContextFilter())
+
+
+_configure_log_format(CONFIG)
 
 try:
     client = OpenAI(
@@ -249,10 +627,85 @@ try:
     )
 except Exception as e:
     logger.error(f"Error initializing OpenAI client: {e}")
-    exit(1)
+    sys.exit(1)
 
 app = Flask(__name__)
 CACHED_MODELS = []
+
+# Config reload state
+_config_file_path = 'config.yml'
+_last_config_reload_time = None
+
+try:
+    _last_config_mtime = os.path.getmtime(_config_file_path)
+except OSError:
+    _last_config_mtime = 0.0
+
+
+def _check_and_reload_config():
+    """Check config.yml mtime; reload everything from scratch if changed."""
+    global CONFIG, CACHED_MODELS, client, _last_config_mtime, _last_config_reload_time
+
+    try:
+        current_mtime = os.path.getmtime(_config_file_path)
+    except OSError:
+        return
+
+    if current_mtime == _last_config_mtime:
+        return
+
+    _last_config_mtime = current_mtime
+
+    try:
+        new_config = load_config(_config_file_path)
+    except Exception as e:
+        logger.warning(f"Config reload failed, keeping current config: {e}")
+        return
+
+    CONFIG = new_config
+
+    try:
+        client = OpenAI(
+            api_key=new_config['openai']['api_key'],
+            base_url=new_config['openai'].get('base_url', 'https://api.openai.com/v1')
+        )
+    except Exception as e:
+        logger.warning(f"Failed to recreate OpenAI client: {e}")
+
+    _configure_log_format(new_config)
+
+    try:
+        get_and_cache_models(force_refresh=True)
+    except Exception as e:
+        logger.warning(f"Failed to rebuild model cache: {e}")
+
+    _last_config_reload_time = datetime.now().isoformat() + "Z"
+    logger.info("Config changed, reloaded")
+
+
+@app.before_request
+def _before_request_reload_config():
+    _check_and_reload_config()
+
+
+@app.before_request
+def _before_request_set_trace_context():
+    """Generate request_id and trace_id for every request when tracing is enabled."""
+    tracing = CONFIG.get('tracing', {})
+    if not tracing.get('enabled', False):
+        g.request_id = None
+        g.trace_id = None
+        g.litellm_response_headers = {}
+        return
+    g.request_id = f"req_{uuid.uuid4().hex[:12]}"
+    incoming_trace = request.headers.get('x-litellm-trace-id')
+    if incoming_trace:
+        g.trace_id = incoming_trace
+    else:
+        prefix = tracing.get('trace_id_prefix', 'oa')
+        g.trace_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
+    g.litellm_response_headers = {}
+
 
 def get_display_name(original_name):
     """
@@ -291,50 +744,77 @@ def resolve_model_name(client_name):
     # If not found as custom_name, return as-is (may be original name)
     return client_name
 
-def get_and_cache_models():
+def get_and_cache_models(force_refresh=False):
     """
     Fetches, filters, maps and caches model list.
     Updated according to Ollama API documentation.
+
+    Args:
+        force_refresh: If True, rebuilds cache atomically even if already populated.
     """
     global CACHED_MODELS
-    if CACHED_MODELS:
+    if CACHED_MODELS and not force_refresh:
         return CACHED_MODELS
 
-    logger.info("Model cache is empty. Requesting model list from OpenAI...")
+    action = "Refreshing" if force_refresh else "Requesting"
+    logger.info(f"Model cache: {action} model list from OpenAI...")
     try:
         all_models_response = client.models.list().data
         models_config = CONFIG.get('models', [])
 
-        # If models list is empty, use all available models
-        # Otherwise, filter to only those specified in models list
-        filtered_models = all_models_response
-        if models_config:
-            allowed_model_names = [model_entry['name'] for model_entry in models_config if 'name' in model_entry]
-            filtered_models = [m for m in all_models_response if m.id in allowed_model_names]
+        model_details = {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "llama",
+            "families": ["llama"],
+            "parameter_size": "8.0B",
+            "quantization_level": "Q4_0",
+        }
 
-        CACHED_MODELS = [
-            {
-                "name": get_display_name(model.id),
-                "model": get_display_name(model.id),
-                "modified_at": datetime.fromtimestamp(model.created).isoformat() + "Z",
-                "size": 0,
-                "digest": model.id,  # Keep original name for internal identification
-                "details": {
-                    "parent_model": "",
-                    "format": "gguf",
-                    "family": "llama",
-                    "families": ["llama"],
-                    "parameter_size": "8.0B",
-                    "quantization_level": "Q4_0",
-                }
-            }
-            for model in filtered_models
-        ]
+        new_models = []
+        if models_config:
+            # Build lookup by OpenAI model id for metadata
+            openai_models_by_id = {m.id: m for m in all_models_response}
+
+            # Create one cached entry per config entry (supports multiple
+            # entries for the same model with different custom_names)
+            for model_entry in models_config:
+                model_name = model_entry.get('name') if isinstance(model_entry, dict) else None
+                if not model_name or model_name not in openai_models_by_id:
+                    continue
+                openai_model = openai_models_by_id[model_name]
+                display_name = model_entry.get('custom_name', model_name)
+                new_models.append({
+                    "name": display_name,
+                    "model": display_name,
+                    "modified_at": datetime.fromtimestamp(openai_model.created).isoformat() + "Z",
+                    "size": 0,
+                    "digest": model_name,
+                    "details": model_details,
+                })
+        else:
+            # No models configured — expose all available OpenAI models
+            for model in all_models_response:
+                new_models.append({
+                    "name": model.id,
+                    "model": model.id,
+                    "modified_at": datetime.fromtimestamp(model.created).isoformat() + "Z",
+                    "size": 0,
+                    "digest": model.id,
+                    "details": model_details,
+                })
+
+        # Atomic swap — requests see either old or new list, never empty
+        CACHED_MODELS = new_models
         logger.info(f"Models successfully loaded and cached. Found: {len(CACHED_MODELS)}")
         return CACHED_MODELS
     except Exception as e:
         logger.error(f"Critical error getting models from OpenAI: {e}")
+        if force_refresh:
+            logger.warning("Keeping previous model cache after refresh failure")
+            return CACHED_MODELS
         return []
+
 
 @app.route('/api/tags', methods=['GET', 'POST'])
 @log_endpoint
@@ -436,59 +916,129 @@ def show_model():
     }
     return jsonify(response_data)
 
-def get_model_config(model_id):
+def resolve_ip_list(ip_value):
+    """Resolve an ip_routing 'ip' field to a list of IP addresses.
+    If ip_value matches a key in CONFIG['clients'], returns that client group's IPs.
+    Otherwise treats ip_value as a direct IP address."""
+    clients = CONFIG.get('clients', {}) or {}
+    if isinstance(ip_value, str) and ip_value in clients:
+        client_ips = clients[ip_value]
+        if isinstance(client_ips, str):
+            return [client_ips]
+        return list(client_ips)
+    if isinstance(ip_value, str):
+        return [ip_value]
+    return []
+
+def apply_ip_routing(model_entry, client_ip):
+    """Apply IP-based routing overrides to a model config entry.
+    Returns a new dict with overrides merged; does not mutate the original.
+    Scalar fields (name, system_prompt, remove_thinking_tags) are replaced.
+    Dict fields (params, headers) are shallow-merged."""
+    ip_routing = model_entry.get('ip_routing')
+    if not ip_routing or not client_ip:
+        return model_entry
+
+    matching_rule = None
+    for rule in ip_routing:
+        resolved_ips = resolve_ip_list(rule.get('ip', ''))
+        if client_ip in resolved_ips:
+            matching_rule = rule
+            break
+
+    if matching_rule is None:
+        return model_entry
+
+    merged = dict(model_entry)
+    merged.pop('ip_routing', None)
+
+    for key in ('name', 'system_prompt', 'remove_thinking_tags', 'prompt_caching'):
+        if key in matching_rule:
+            merged[key] = matching_rule[key]
+
+    for key in ('params', 'headers'):
+        if key in matching_rule:
+            parent_dict = dict(model_entry.get(key, {}) or {})
+            override_dict = matching_rule[key]
+            if override_dict is not None:
+                parent_dict.update(override_dict)
+            merged[key] = parent_dict
+
+    logger.info(
+        f"IP routing applied: client_ip={client_ip}, "
+        f"model='{model_entry.get('custom_name') or model_entry.get('name')}', "
+        f"routed_to='{merged.get('name')}'"
+    )
+
+    return merged
+
+def get_model_config(model_id, client_ip=None):
     """
-    Returns model configuration split into OpenAI and adapter parameters.
-    Works with models list format: [{name: "model-name", temperature: 0.7, max_tokens: 1000}, ...]
-    Passes through OpenAI parameters without validation.
-    Supports both custom_name and original model names.
+    Returns model configuration split into OpenAI params, adapter params, and headers.
+    If client_ip is provided, applies IP-based routing overrides.
+
+    Config format per model:
+      - name (required): OpenAI model identifier
+      - custom_name (optional): Display name for clients
+      - remove_thinking_tags (optional): Remove <think>/<thinking> tags
+      - system_prompt (optional): System prompt string or path to .md file
+      - params (optional): Dict of OpenAI API parameters (passthrough, including nested)
+      - headers (optional): Dict of HTTP headers for OpenAI API requests
+      - ip_routing (optional): List of IP-specific overrides
 
     Args:
         model_id: Model name (custom_name or original)
+        client_ip: Client IP address for IP-based routing (optional)
 
     Returns:
-        tuple: (openai_params, adapter_params)
+        tuple: (openai_params, adapter_params, headers)
             - openai_params: dict with parameters for OpenAI API (includes model_id)
             - adapter_params: dict with adapter-specific parameters (remove_thinking_tags, etc.)
+            - headers: dict with HTTP headers for OpenAI API requests
     """
-    # Define adapter-specific parameters that should not be sent to OpenAI
-    ADAPTER_PARAMS = {'remove_thinking_tags'}
-
     # Check for model-specific configuration in config
     models_config = CONFIG.get('models', [])
 
     # Resolve to original name
     original_name = resolve_model_name(model_id)
 
-    # Find model entry by original name
+    # Find model entry: prefer match by custom_name, then fall back to original name
     model_entry = None
     for model_config in models_config:
-        if isinstance(model_config, dict) and model_config.get('name') == original_name:
+        if isinstance(model_config, dict) and model_config.get('custom_name') == model_id:
             model_entry = model_config
             break
 
     if model_entry is None:
-        # Model not in config, return empty parameters
-        return {'model_id': original_name}, {}
-    else:
-        # Model found, split parameters into OpenAI and adapter params
-        # CRITICAL: Exclude 'name' and 'custom_name' from both dicts
-        openai_params = {}
-        adapter_params = {}
+        for model_config in models_config:
+            if isinstance(model_config, dict) and model_config.get('name') == original_name:
+                model_entry = model_config
+                break
 
-        for k, v in model_entry.items():
-            if k in ('name', 'custom_name'):
-                # Skip these fields entirely
-                continue
-            elif k in ADAPTER_PARAMS:
-                # Adapter-specific parameter
-                adapter_params[k] = v
-            else:
-                # OpenAI API parameter
-                openai_params[k] = v
+    if model_entry is None:
+        return {'model_id': original_name}, {}, {}
 
-        openai_params['model_id'] = original_name  # Always use original name
-        return openai_params, adapter_params
+    # Apply IP-based routing overrides if client_ip provided
+    if client_ip:
+        model_entry = apply_ip_routing(model_entry, client_ip)
+
+    # Extract adapter params from root level
+    adapter_params = {}
+    if 'remove_thinking_tags' in model_entry:
+        adapter_params['remove_thinking_tags'] = model_entry['remove_thinking_tags']
+    if 'system_prompt' in model_entry:
+        adapter_params['system_prompt'] = model_entry['system_prompt']
+    if 'prompt_caching' in model_entry:
+        adapter_params['prompt_caching'] = model_entry['prompt_caching']
+
+    # Extract OpenAI params from 'params' section (passthrough as-is)
+    openai_params = dict(model_entry.get('params', {}) or {})
+    openai_params['model_id'] = model_entry.get('name', original_name)
+
+    # Extract HTTP headers from 'headers' section
+    headers = dict(model_entry.get('headers', {}) or {})
+
+    return openai_params, adapter_params, headers
 
 def create_final_response(model_name, prompt_tokens, completion_tokens, total_duration_ns):
     """
@@ -527,6 +1077,7 @@ def chat():
         # Separate display name and OpenAI name
         display_name = model_id
         original_name = resolve_model_name(model_id)
+        client_ip = get_client_ip()
 
         messages = data.get("messages")
         if not messages:
@@ -542,24 +1093,53 @@ def chat():
                 completion_tokens = 0
                 prompt_tokens = -1 # Will be determined later if OpenAI returns it
 
+                _raw_ctx = None
                 try:
                     # Get model configuration
-                    openai_params, adapter_params = get_model_config(model_id)
+                    openai_params, adapter_params, extra_headers = get_model_config(model_id, client_ip=client_ip)
 
                     # Prepare OpenAI API parameters
                     api_params = {
-                        'model': original_name,  # Use original name for OpenAI
+                        'model': openai_params.get('model_id', original_name),
                         'messages': messages,
                         'stream': True,
                         'stream_options': {"include_usage": True}
                     }
 
-                    # Add all model-specific parameters from config
-                    for key, value in openai_params.items():
-                        if key != 'model_id':  # Skip our internal field
-                            api_params[key] = value
+                    # Build extra_body from config params (passthrough without SDK validation)
+                    extra_body = {k: v for k, v in openai_params.items() if k != 'model_id'}
 
-                    response_stream = client.chat.completions.create(**api_params)
+                    # Apply system prompt from config (if configured)
+                    api_params['messages'] = apply_system_prompt(
+                        api_params['messages'], adapter_params, model_id
+                    )
+                    api_params['messages'] = apply_prompt_caching(
+                        api_params['messages'], adapter_params, model_id
+                    )
+
+                    # Tracing: merge headers and body metadata
+                    merged_headers = build_trace_headers(extra_headers, display_name) or None
+                    trace_meta = build_trace_body_metadata(display_name)
+                    if trace_meta:
+                        extra_body['metadata'] = trace_meta
+
+                    # Create stream (with or without response header extraction)
+                    if _tracing_log_headers_enabled():
+                        _raw_ctx = client.chat.completions.with_streaming_response.create(
+                            **api_params,
+                            extra_body=extra_body or None,
+                            extra_headers=merged_headers
+                        )
+                        _raw_response = _raw_ctx.__enter__()
+                        _capture_litellm_headers(_raw_response.headers)
+                        _log_litellm_headers()
+                        response_stream = _raw_response.parse()
+                    else:
+                        response_stream = client.chat.completions.create(
+                            **api_params,
+                            extra_body=extra_body or None,
+                            extra_headers=merged_headers
+                        )
 
                     # State machine for thinking tag removal
                     remove_tags = adapter_params.get('remove_thinking_tags', False)
@@ -742,24 +1322,53 @@ def chat():
 
                 except Exception as e:
                     yield json.dumps({"error": f"Streaming error: {str(e)}"}) + '\n'
+                finally:
+                    if _raw_ctx is not None:
+                        _raw_ctx.__exit__(None, None, None)
 
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
-            openai_params, adapter_params = get_model_config(model_id)
+            openai_params, adapter_params, extra_headers = get_model_config(model_id, client_ip=client_ip)
 
             # Prepare OpenAI API parameters
             api_params = {
-                'model': original_name,  # Use original name for OpenAI
+                'model': openai_params.get('model_id', original_name),
                 'messages': messages,
                 'stream': False
             }
 
-            # Add all model-specific parameters from config
-            for key, value in openai_params.items():
-                if key != 'model_id':  # Skip our internal field
-                    api_params[key] = value
+            # Build extra_body from config params (passthrough without SDK validation)
+            extra_body = {k: v for k, v in openai_params.items() if k != 'model_id'}
 
-            response = client.chat.completions.create(**api_params)
+            # Apply system prompt from config (if configured)
+            api_params['messages'] = apply_system_prompt(
+                api_params['messages'], adapter_params, model_id
+            )
+            api_params['messages'] = apply_prompt_caching(
+                api_params['messages'], adapter_params, model_id
+            )
+
+            # Tracing: merge headers and body metadata
+            merged_headers = build_trace_headers(extra_headers, display_name) or None
+            trace_meta = build_trace_body_metadata(display_name)
+            if trace_meta:
+                extra_body['metadata'] = trace_meta
+
+            if _tracing_log_headers_enabled():
+                raw = client.chat.completions.with_raw_response.create(
+                    **api_params,
+                    extra_body=extra_body or None,
+                    extra_headers=merged_headers
+                )
+                response = raw.parse()
+                _capture_litellm_headers(raw.headers)
+                _log_litellm_headers()
+            else:
+                response = client.chat.completions.create(
+                    **api_params,
+                    extra_body=extra_body or None,
+                    extra_headers=merged_headers
+                )
             duration_ns = int((time.time() - start_time) * 1e9)
 
             final_response = create_final_response(
@@ -808,6 +1417,7 @@ def generate():
         # Separate display name and OpenAI name
         display_name = model_id
         original_name = resolve_model_name(model_id)
+        client_ip = get_client_ip()
 
         prompt = data.get("prompt")
         if not prompt:
@@ -821,29 +1431,63 @@ def generate():
         # Convert prompt to messages format for OpenAI
         messages = [{"role": "user", "content": prompt}]
 
+        # Handle Ollama's 'system' parameter from request
+        request_system = data.get("system")
+        if request_system and isinstance(request_system, str) and request_system.strip():
+            messages.insert(0, {"role": "system", "content": request_system.strip()})
+
         if stream:
             def generate_stream():
                 completion_tokens = 0
                 prompt_tokens = 0
 
+                _raw_ctx = None
                 try:
                     # Get model configuration
-                    openai_params, adapter_params = get_model_config(model_id)
+                    openai_params, adapter_params, extra_headers = get_model_config(model_id, client_ip=client_ip)
 
                     # Prepare OpenAI API parameters
                     api_params = {
-                        'model': original_name,  # Use original name for OpenAI
+                        'model': openai_params.get('model_id', original_name),
                         'messages': messages,
                         'stream': True,
                         'stream_options': {"include_usage": True}
                     }
 
-                    # Add all model-specific parameters from config
-                    for key, value in openai_params.items():
-                        if key != 'model_id':  # Skip our internal field
-                            api_params[key] = value
+                    # Build extra_body from config params (passthrough without SDK validation)
+                    extra_body = {k: v for k, v in openai_params.items() if k != 'model_id'}
 
-                    response_stream = client.chat.completions.create(**api_params)
+                    # Apply system prompt from config (if configured)
+                    api_params['messages'] = apply_system_prompt(
+                        api_params['messages'], adapter_params, model_id
+                    )
+                    api_params['messages'] = apply_prompt_caching(
+                        api_params['messages'], adapter_params, model_id
+                    )
+
+                    # Tracing: merge headers and body metadata
+                    merged_headers = build_trace_headers(extra_headers, display_name) or None
+                    trace_meta = build_trace_body_metadata(display_name)
+                    if trace_meta:
+                        extra_body['metadata'] = trace_meta
+
+                    # Create stream (with or without response header extraction)
+                    if _tracing_log_headers_enabled():
+                        _raw_ctx = client.chat.completions.with_streaming_response.create(
+                            **api_params,
+                            extra_body=extra_body or None,
+                            extra_headers=merged_headers
+                        )
+                        _raw_response = _raw_ctx.__enter__()
+                        _capture_litellm_headers(_raw_response.headers)
+                        _log_litellm_headers()
+                        response_stream = _raw_response.parse()
+                    else:
+                        response_stream = client.chat.completions.create(
+                            **api_params,
+                            extra_body=extra_body or None,
+                            extra_headers=merged_headers
+                        )
 
                     # State machine for thinking tag removal
                     remove_tags = adapter_params.get('remove_thinking_tags', False)
@@ -1026,24 +1670,53 @@ def generate():
 
                 except Exception as e:
                     yield json.dumps({"error": f"Streaming error: {str(e)}"}) + '\n'
+                finally:
+                    if _raw_ctx is not None:
+                        _raw_ctx.__exit__(None, None, None)
 
             return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
         else:
-            openai_params, adapter_params = get_model_config(model_id)
+            openai_params, adapter_params, extra_headers = get_model_config(model_id, client_ip=client_ip)
 
             # Prepare OpenAI API parameters
             api_params = {
-                'model': original_name,  # Use original name for OpenAI
+                'model': openai_params.get('model_id', original_name),
                 'messages': messages,
                 'stream': False
             }
 
-            # Add all model-specific parameters from config
-            for key, value in openai_params.items():
-                if key != 'model_id':  # Skip our internal field
-                    api_params[key] = value
+            # Build extra_body from config params (passthrough without SDK validation)
+            extra_body = {k: v for k, v in openai_params.items() if k != 'model_id'}
 
-            response = client.chat.completions.create(**api_params)
+            # Apply system prompt from config (if configured)
+            api_params['messages'] = apply_system_prompt(
+                api_params['messages'], adapter_params, model_id
+            )
+            api_params['messages'] = apply_prompt_caching(
+                api_params['messages'], adapter_params, model_id
+            )
+
+            # Tracing: merge headers and body metadata
+            merged_headers = build_trace_headers(extra_headers, display_name) or None
+            trace_meta = build_trace_body_metadata(display_name)
+            if trace_meta:
+                extra_body['metadata'] = trace_meta
+
+            if _tracing_log_headers_enabled():
+                raw = client.chat.completions.with_raw_response.create(
+                    **api_params,
+                    extra_body=extra_body or None,
+                    extra_headers=merged_headers
+                )
+                response = raw.parse()
+                _capture_litellm_headers(raw.headers)
+                _log_litellm_headers()
+            else:
+                response = client.chat.completions.create(
+                    **api_params,
+                    extra_body=extra_body or None,
+                    extra_headers=merged_headers
+                )
             duration_ns = int((time.time() - start_time) * 1e9)
 
             if not response.choices:
@@ -1098,6 +1771,11 @@ def embed():
         # Separate display name and OpenAI name
         display_name = model
         original_name = resolve_model_name(model)
+        client_ip = get_client_ip()
+
+        # Apply IP routing for embeddings model
+        openai_params, _, extra_headers = get_model_config(model, client_ip=client_ip)
+        resolved_model = openai_params.get('model_id', original_name)
 
         input_text = data.get("input")
         if not input_text:
@@ -1112,10 +1790,24 @@ def embed():
         if isinstance(input_text, str):
             input_text = [input_text]
 
-        response = client.embeddings.create(
-            model=original_name,  # Use resolved model name instead of hardcoded
-            input=input_text
-        )
+        # Tracing: merge headers
+        merged_headers = build_trace_headers(extra_headers, display_name) or None
+
+        if _tracing_log_headers_enabled():
+            raw = client.embeddings.with_raw_response.create(
+                model=resolved_model,
+                input=input_text,
+                extra_headers=merged_headers
+            )
+            response = raw.parse()
+            _capture_litellm_headers(raw.headers)
+            _log_litellm_headers()
+        else:
+            response = client.embeddings.create(
+                model=resolved_model,
+                input=input_text,
+                extra_headers=merged_headers
+            )
 
         embeddings = [embedding.embedding for embedding in response.data]
 
@@ -1149,6 +1841,7 @@ def health_check():
                 "openai": openai_status,
                 "cached_models": cached_models_count
             },
+            "last_config_reload": _last_config_reload_time,
             "version": "0.1.0"
         }), 200
 
