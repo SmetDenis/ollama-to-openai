@@ -4,113 +4,108 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an Ollama-to-OpenAI adapter service written in Python. It acts as a proxy that translates Ollama API requests to OpenAI API calls, allowing Ollama clients to use OpenAI models seamlessly.
-
-The service supports Docker containerization with docker-compose for easy deployment.
+Ollama-to-OpenAI adapter — Python-сервис (Flask), который транслирует запросы Ollama API в вызовы OpenAI API. Позволяет клиентам Ollama прозрачно использовать модели OpenAI (и совместимые провайдеры через LiteLLM).
 
 ## Architecture
 
-The application consists of a single Flask web server (`ollama_to_openai_adapter.py`) that:
+Всё приложение — **один файл** `ollama_to_openai_adapter.py` (~1900 строк). Зависимости: Flask, OpenAI SDK, PyYAML.
 
-1. **Configuration Management**: Loads settings from `config.yml` including server host/port, OpenAI API credentials, models list with filtering, logging configuration, and comprehensive model-specific parameter support
-2. **Model Caching**: Fetches and caches OpenAI models, mapping them to Ollama-compatible format with synthetic metadata
-3. **API Translation**: Implements complete Ollama endpoints (`/api/tags`, `/api/show`, `/api/chat`, `/api/generate`, `/api/embed`, `/api/version`, `/api/ps`, `/health`, `/`) that proxy to OpenAI
-4. **Streaming Support**: Handles both streaming and non-streaming chat completions and text generation with proper NDJSON format
-5. **Logging System**: Comprehensive request/response logging with configurable levels, request tracking, and performance metrics
-6. **Input Validation**: Robust validation for all API endpoints with proper error handling and descriptive error messages
-7. **Health Monitoring**: Health check endpoint for service monitoring with OpenAI connectivity status
-8. **Parameter Passthrough**: All OpenAI API parameters can be configured per model without validation, providing full flexibility
+### Request Flow
+
+1. `@app.before_request` — проверяет mtime `config.yml`, при изменении перезагружает конфиг, пересоздаёт OpenAI-клиент, обновляет кеш моделей
+2. `@log_endpoint` декоратор — логирует запрос/ответ, замеряет время
+3. Endpoint handler — валидация входных данных, получение конфига модели, вызов OpenAI API, форматирование ответа в формат Ollama
+4. Если tracing включён — `@app.before_request` генерирует `request_id`/`trace_id`, которые попадают в логи через `TraceContextFilter`
+
+### Key Functions
+
+- **`get_model_config(model_id, client_ip)`** — центральная функция конфигурации. Возвращает кортеж `(openai_params, adapter_params, headers)`:
+  - `openai_params` — параметры для OpenAI API (temperature, max_tokens и т.д.) + `model_id`
+  - `adapter_params` — настройки адаптера (remove_thinking_tags, system_prompt, prompt_caching)
+  - `headers` — кастомные HTTP-заголовки для OpenAI API
+- **`resolve_model_name(client_name)`** — преобразует custom_name в оригинальный OpenAI model ID
+- **`get_display_name(original_name)`** — обратное преобразование для ответов клиентам
+- **`apply_ip_routing(model_entry, client_ip)`** — применяет IP-специфичные override'ы; shallow merge для dict-полей (params, headers)
+- **`get_and_cache_models()`** — загружает модели из OpenAI API, кеширует в `CACHED_MODELS` с синтетическими метаданными Ollama-формата
+- **`apply_system_prompt(messages, adapter_params, model_id)`** — внедряет системный промпт из конфига
+- **`resolve_system_prompt(value)`** — если значение заканчивается на `.md`, читает файл при каждом запросе (hot-reload промптов без рестарта)
+- **`apply_prompt_caching(messages, adapter_params, model_id)`** — добавляет `cache_control` маркеры в system message для Anthropic/Gemini через LiteLLM
+- **`remove_thinking_tags(content, model_id, remove_enabled)`** — удаление `<think>`/`<thinking>` тегов (regex для non-streaming)
+
+### Streaming Thinking Tag Removal
+
+Для стриминга используется **5-state machine** (определена inline в `chat()` и `generate()`):
+1. `INITIAL` — захват первого chunk'а
+2. `DETECTING_OPEN_TAG` — поиск открывающего `<think>`/`<thinking>`
+3. `BUFFERING_THINKING` — накопление содержимого до `</`
+4. `DETECTING_CLOSE_TAG` — поиск закрывающего тега
+5. `STREAMING_NORMAL` — прямая трансляция остального контента
+
+### Prompts Directory
+
+`prompts/` — файлы системных промптов (`.md`), на которые ссылается `system_prompt` в конфиге моделей. Монтируются read-only в Docker. Файлы перечитываются при каждом запросе — можно менять без рестарта.
 
 ## Commands
 
-### Running the Application
 ```bash
-# Local Python execution
+# Запуск локально
 python3 ollama_to_openai_adapter.py
-
-# Or with virtual environment
+# или через venv
 ./.venv/bin/python3 ollama_to_openai_adapter.py
 
-# Docker build and run
+# Docker Compose (порт 11345 -> 11434)
+docker-compose up -d
+
+# Docker standalone
 docker build -t ollama-to-openai .
 docker run -p 11434:11434 -v ./config.yml:/app/config.yml:ro ollama-to-openai
 
-# Docker Compose (service runs on port 11345)
-docker-compose up -d
+# Пересоздание виртуального окружения
+uv sync
 ```
-
-
-### Setup and Installation
-```bash
-# Virtual environment is managed by UV package manager
-# Dependencies are defined in pyproject.toml
-# No manual installation needed if .venv exists
-
-# Configuration setup
-cp config-example.yml config.yml
-# Edit config.yml with your OpenAI API key and settings
-
-# To recreate environment (if needed):
-# uv sync
-```
-
 
 ## Configuration
 
-The `config.yml` file contains:
-- `server.host` and `server.port`: Web server binding configuration
-- `openai.api_key`: OpenAI API key (required)
-- `openai.base_url`: Custom OpenAI endpoint URL (optional, for Azure OpenAI, local LLMs, etc.)
-- `logging.log_level`: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- `logging.log_requests`: Enable/disable detailed request/response logging
-- `clients` (optional): Named IP groups (aliases) mapping to lists of IP addresses, used in `ip_routing` rules
-- `tracing` (optional): Request tracing and LiteLLM proxy integration
-  - `enabled`: Master switch (default: false). When true, each request gets unique request_id and trace_id in logs
-  - `log_headers`: Extract LiteLLM response headers (cost, duration, model-id) using OpenAI SDK with_raw_response/with_streaming_response
-  - `send_trace_headers`: Send x-litellm-trace-id, x-litellm-call-id, adapter_model (display name) to LiteLLM proxy
-  - `trace_id_prefix`: Prefix for auto-generated trace IDs (default: "oa")
-  - `tags`: Comma-separated tags sent as x-litellm-tags header
-- `models`: List of model configurations with two-level structure:
-  - Root level (proxy settings): `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt`
-  - `params` (optional): OpenAI API parameters dict — passed through as-is without validation (supports nested structures)
-  - `headers` (optional): Extra HTTP headers dict — added to OpenAI API requests for this model
-  - `ip_routing` (optional): List of IP-specific overrides. Each entry has `ip` (alias from `clients` or direct IP), plus optional `name`, `params`, `headers`, `system_prompt`, `remove_thinking_tags`, `prompt_caching`. Unspecified fields inherit from parent model. Dict fields (params, headers) are shallow-merged.
+Файл `config.yml` (см. `config-example.yml` для полного примера с комментариями). Ключевые секции:
 
-## Key Implementation Details
+- **`server`**: `host`, `port`
+- **`openai`**: `api_key` (обязательный), `base_url` (опциональный — для LiteLLM, Azure и др.)
+- **`clients`**: именованные группы IP-адресов для `ip_routing`
+- **`logging`**: `log_level`, `log_requests`
+- **`tracing`**: интеграция с LiteLLM proxy — request_id/trace_id, заголовки, теги
+- **`models`**: список моделей с двухуровневой структурой:
+  - Корневой уровень: `name` (обязательный), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt`
+  - `params`: dict параметров OpenAI API — passthrough без валидации
+  - `headers`: dict кастомных HTTP-заголовков
+  - `ip_routing`: список IP-специфичных override'ов (наследование + shallow merge)
 
-- **Model Mapping**: OpenAI models are mapped to Ollama format with synthetic metadata (parent_model, format, family, parameter_size, quantization_level)
-- **Error Handling**: Configuration validation on startup, comprehensive input validation with descriptive error messages for all endpoints
-- **Response Format**: All responses follow Ollama API specifications with proper timing (total_duration, eval_duration, load_duration) and token usage data
-- **Streaming**: Uses Flask's `stream_with_context` for real-time NDJSON streaming in chat and generation endpoints
-- **Parameter Flexibility**: OpenAI API parameters are configured per model under `params:` key and passed through without validation; per-model HTTP headers via `headers:` key
-- **Prompt Caching**: Provider-side prompt caching via `prompt_caching: true` flag. Injects `cache_control` markers into system message content blocks, enabling caching on Anthropic and Google Gemini through LiteLLM. OpenAI caching is automatic and unaffected by this flag
-- **IP Routing**: Per-model IP-based routing with named client groups (`clients` section). Different clients can be routed to different backend models with different parameters. Client IP detection supports X-Forwarded-For and X-Real-IP headers for reverse proxy setups
-- **Debug Mode**: Flask runs in debug mode with auto-reload and stat-based reloader for development
-- **Complete API Coverage**: Full Ollama API compatibility including chat, generate, embed, tags, show, version, ps, health endpoints
-- **Logging**: Request/response logging with performance tracking, configurable detail levels, and error tracking
-- **Tracing**: Optional LiteLLM proxy integration via `tracing` config section. Generates request_id/trace_id per request, forwards x-litellm-* headers, extracts response headers (cost, duration, model-id). Sends adapter_model (custom_name) via x-litellm-spend-logs-metadata header and body metadata for LiteLLM UI and Langfuse visibility. Supports incoming x-litellm-trace-id passthrough from clients. When enabled, log format includes [request_id|trace_id] context
-- **Health Monitoring**: Health endpoint checks OpenAI connectivity and reports cached model count
+Если `models` пуст — выставляются все доступные модели OpenAI. Если заполнен — только указанные.
+
+Config hot-reload: при каждом запросе проверяется mtime файла. При изменении — перезагрузка конфига, пересоздание OpenAI-клиента, обновление кеша моделей. При ошибке загрузки — сохраняется текущий конфиг.
+
+## API Endpoints
+
+| Endpoint | Method | Назначение |
+|---|---|---|
+| `/api/chat` | POST | Chat completions (streaming/non-streaming) |
+| `/api/generate` | POST | Text generation (streaming/non-streaming) |
+| `/api/embed` | POST | Embeddings |
+| `/api/tags` | GET/POST | Список моделей |
+| `/api/show` | POST | Информация о модели |
+| `/api/version` | GET | Версия сервиса |
+| `/api/ps` | GET | Running models (mock) |
+| `/health` | GET | Health check с проверкой OpenAI |
+| `/` | GET | Информация о сервисе |
 
 ## Testing
 
-**Important**: The user will handle testing manually. Do not automatically run the server after making changes. The user will start the server themselves to test any modifications.
+**Важно**: НЕ запускать сервер автоматически после изменений. Пользователь тестирует сам.
 
-### Manual Testing
-
-Use the HTTP test cases in `tests/manual-check.http` (178 lines) which includes comprehensive test scenarios:
-- Health checks and service information
-- Model listing and details (GET and POST formats)
-- Chat completions (streaming and non-streaming, multi-turn conversations)
-- Text generation with prompts (streaming and non-streaming)
-- Process listing (mock endpoint)
-- Error handling and validation tests (invalid models, missing fields, malformed JSON)
-
-**Note**: Test cases use port 11345 (docker-compose port), adjust to 11434 for local development.
-
+Ручные тесты: `tests/manual-check.http` — HTTP-запросы для всех эндпоинтов, включая error cases. Порт 11345 (docker-compose) или 11434 (локально).
 
 ## Development Notes
 
-- **Package Management**: Uses UV package manager with dependencies in `pyproject.toml`
-- **Environment**: Virtual environment managed in `.venv/` directory
-- **Version**: 0.1.0 (consistent across project files)
-- **Python**: Requires Python 3.13+
+- **Package Manager**: UV с lock-файлом (`uv.lock`)
+- **Python**: 3.13+ (`.python-version`)
+- **Flask debug mode**: включён — auto-reload при изменении кода
+- **Версия**: 0.1.0
