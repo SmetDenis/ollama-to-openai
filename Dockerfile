@@ -1,9 +1,7 @@
 # Use Python 3.13 slim image as base
-FROM python:3.13-slim
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y && rm -rf /var/lib/apt/lists/*
-RUN pip install uv
-
 COPY . /app
 RUN uv sync --frozen
 
