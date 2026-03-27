@@ -119,3 +119,5 @@ Config hot-reload: при каждом запросе проверяется mti
 - **Python**: 3.13+ (`.python-version`)
 - **Flask debug mode**: включён — auto-reload при изменении кода
 - **Версия**: 0.1.0
+- **CI/CD**: GitHub Actions (`.github/workflows/ci.yml`) — линтеры + сборка Docker-образа в GHCR
+- **Линтеры и тесты**: всегда запускать через `make` (например `make check`), а не напрямую вызывать ruff/mypy/pytest
