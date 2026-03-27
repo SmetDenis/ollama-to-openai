@@ -1,15 +1,15 @@
 .PHONY: lint lint-fix format check
 
 lint:
-	ruff check .
+	uv run ruff check .
 
 lint-fix:
-	ruff check --fix .
+	uv run ruff check --fix .
 
 format:
-	ruff format .
+	uv run ruff format .
 
 check:
-	ruff format --check .
-	ruff check .
-	mypy ollama_adapter/
+	uv run ruff format --check .
+	uv run ruff check .
+	uv run mypy ollama_adapter/
