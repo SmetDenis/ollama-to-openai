@@ -1,153 +1,208 @@
-import sys
-import os
+"""Configuration loading, validation, and hot-reload logic."""
+
 import logging
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
 import yaml
-from datetime import datetime
 from openai import OpenAI
 
 from ollama_adapter import state
 from ollama_adapter.logging_utils import TraceContextFilter
 
 
-def load_config(path='config.yml'):
-    """Loads and validates YAML configuration file. Raises on any error."""
-    with open(path, 'r', encoding='utf-8') as f:
+def _validate_required_fields(config: dict) -> None:
+    """Validate required top-level configuration fields exist."""
+    if not config.get("openai", {}).get("api_key"):
+        msg = "Missing required parameter 'openai.api_key' in config.yml"
+        raise ValueError(msg)
+    if not config.get("server", {}).get("host"):
+        msg = "Missing required parameter 'server.host' in config.yml"
+        raise ValueError(msg)
+    if not config.get("server", {}).get("port"):
+        msg = "Missing required parameter 'server.port' in config.yml"
+        raise ValueError(msg)
+
+
+def _normalize_model_names(models_config: list[dict]) -> None:
+    """Strip whitespace from custom_name values in-place."""
+    for model in models_config:
+        if isinstance(model, dict) and "custom_name" in model:
+            model["custom_name"] = model["custom_name"].strip()
+
+
+def _validate_custom_name_uniqueness(models_config: list[dict]) -> None:
+    """Ensure all custom_name values are unique across models."""
+    custom_names = [
+        model["custom_name"] for model in models_config if isinstance(model, dict) and "custom_name" in model
+    ]
+    duplicates = [name for name in set(custom_names) if custom_names.count(name) > 1]
+    if duplicates:
+        msg = f"Duplicate custom_name values found: {duplicates}"
+        raise ValueError(msg)
+
+
+def _validate_clients(clients_config: dict) -> None:
+    """Validate the clients section: alias -> IP mappings."""
+    if not isinstance(clients_config, dict):
+        msg = "'clients' must be a dict mapping alias names to IP addresses"
+        raise TypeError(msg)
+    for alias, ips in clients_config.items():
+        if isinstance(ips, str):
+            if not ips.strip():
+                msg = f"Client alias '{alias}': IP address cannot be empty"
+                raise ValueError(msg)
+            clients_config[alias] = ips.strip()
+        elif isinstance(ips, list):
+            if not ips:
+                msg = f"Client alias '{alias}': IP list cannot be empty"
+                raise ValueError(msg)
+            for i, ip in enumerate(ips):
+                if not isinstance(ip, str) or not ip.strip():
+                    msg = f"Client alias '{alias}': ip[{i}] must be a non-empty string"
+                    raise ValueError(msg)
+            clients_config[alias] = [ip.strip() for ip in ips]
+        else:
+            msg = f"Client alias '{alias}': value must be a string or list of strings"
+            raise TypeError(msg)
+
+
+def _validate_single_ip_route(
+    rule: Any,
+    rule_idx: int,
+    model_display: str,
+    clients_config: dict | None,
+    seen_ips: set[str],
+) -> None:
+    """Validate a single ip_routing rule entry."""
+    if not isinstance(rule, dict):
+        msg = f"Model '{model_display}': ip_routing[{rule_idx}] must be a dict"
+        raise TypeError(msg)
+
+    ip_value = rule.get("ip")
+    if not ip_value or not isinstance(ip_value, str) or not ip_value.strip():
+        msg = (
+            f"Model '{model_display}': ip_routing[{rule_idx}] "
+            f"must have a non-empty 'ip' field (alias name or direct IP)"
+        )
+        raise ValueError(msg)
+
+    ip_value = ip_value.strip()
+    rule["ip"] = ip_value
+
+    resolved_ips = _resolve_ips_for_validation(ip_value, clients_config)
+    for ip in resolved_ips:
+        if ip in seen_ips:
+            msg = f"Model '{model_display}': duplicate IP '{ip}' in ip_routing"
+            raise ValueError(msg)
+        seen_ips.add(ip)
+
+    for dict_key in ("params", "headers"):
+        if dict_key in rule and rule[dict_key] is not None and not isinstance(rule[dict_key], dict):
+            msg = f"Model '{model_display}': ip_routing[{rule_idx}] '{dict_key}' must be a dict"
+            raise TypeError(msg)
+
+    recognized_keys = {"ip", "name", "system_prompt", "remove_thinking_tags", "prompt_caching", "params", "headers"}
+    unknown_keys = set(rule.keys()) - recognized_keys
+    if unknown_keys:
+        state.logger.warning(
+            "Model '%s': ip_routing[%d] has unrecognized keys %s. "
+            "These will be ignored. Did you mean to put them inside 'params'?",
+            model_display,
+            rule_idx,
+            unknown_keys,
+        )
+
+
+def _resolve_ips_for_validation(ip_value: str, clients_config: dict | None) -> list[str]:
+    """Resolve an IP value to a list of IPs for duplicate checking."""
+    if clients_config and ip_value in clients_config:
+        resolved = clients_config[ip_value]
+        return [resolved] if isinstance(resolved, str) else list(resolved)
+    return [ip_value]
+
+
+def _validate_ip_routing(models_config: list[dict], clients_config: dict | None) -> None:
+    """Validate ip_routing entries in all model configurations."""
+    for idx, model in enumerate(models_config):
+        if not isinstance(model, dict):
+            continue
+        ip_routing = model.get("ip_routing")
+        if ip_routing is None:
+            continue
+
+        model_display = model.get("custom_name") or model.get("name", f"models[{idx}]")
+
+        if not isinstance(ip_routing, list):
+            msg = f"Model '{model_display}': 'ip_routing' must be a list"
+            raise TypeError(msg)
+
+        seen_ips: set[str] = set()
+        for rule_idx, rule in enumerate(ip_routing):
+            _validate_single_ip_route(rule, rule_idx, model_display, clients_config, seen_ips)
+
+
+def _validate_tracing(tracing_config: dict) -> None:
+    """Validate the tracing configuration section."""
+    if not isinstance(tracing_config, dict):
+        msg = "'tracing' must be a dict"
+        raise TypeError(msg)
+    for flag in ("enabled", "log_headers", "send_trace_headers"):
+        if flag in tracing_config and not isinstance(tracing_config[flag], bool):
+            msg = f"tracing.{flag} must be a boolean (true/false)"
+            raise ValueError(msg)
+    for field in ("trace_id_prefix", "tags"):
+        if field in tracing_config and not isinstance(tracing_config[field], str):
+            msg = f"tracing.{field} must be a string"
+            raise ValueError(msg)
+
+
+def load_config(path: str = "config.yml") -> dict:
+    """Load and validate YAML configuration file.
+
+    Raise ValueError/TypeError on validation errors.
+    """
+    with Path(path).open(encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    if not config.get('openai', {}).get('api_key'):
-        raise ValueError("Missing required parameter 'openai.api_key' in config.yml")
-    if not config.get('server', {}).get('host'):
-        raise ValueError("Missing required parameter 'server.host' in config.yml")
-    if not config.get('server', {}).get('port'):
-        raise ValueError("Missing required parameter 'server.port' in config.yml")
+    _validate_required_fields(config)
 
-    # Normalize custom_name values (strip whitespace)
-    models_config = config.get('models', [])
+    models_config = config.get("models", [])
     if models_config:
-        for model in models_config:
-            if isinstance(model, dict) and 'custom_name' in model:
-                model['custom_name'] = model['custom_name'].strip()
+        _normalize_model_names(models_config)
+        _validate_custom_name_uniqueness(models_config)
 
-    # Validate custom_name uniqueness
-    if models_config:
-        custom_names = []
-        for model in models_config:
-            if isinstance(model, dict) and 'custom_name' in model:
-                custom_names.append(model['custom_name'])
-
-        duplicates = [name for name in set(custom_names) if custom_names.count(name) > 1]
-        if duplicates:
-            raise ValueError(f"Duplicate custom_name values found: {duplicates}")
-
-    # Validate clients section
-    clients_config = config.get('clients')
+    clients_config = config.get("clients")
     if clients_config is not None:
-        if not isinstance(clients_config, dict):
-            raise ValueError("'clients' must be a dict mapping alias names to IP addresses")
-        for alias, ips in clients_config.items():
-            if isinstance(ips, str):
-                if not ips.strip():
-                    raise ValueError(f"Client alias '{alias}': IP address cannot be empty")
-                clients_config[alias] = ips.strip()
-            elif isinstance(ips, list):
-                if not ips:
-                    raise ValueError(f"Client alias '{alias}': IP list cannot be empty")
-                for i, ip in enumerate(ips):
-                    if not isinstance(ip, str) or not ip.strip():
-                        raise ValueError(f"Client alias '{alias}': ip[{i}] must be a non-empty string")
-                clients_config[alias] = [ip.strip() for ip in ips]
-            else:
-                raise ValueError(f"Client alias '{alias}': value must be a string or list of strings")
+        _validate_clients(clients_config)
 
-    # Validate ip_routing in model entries
     if models_config:
-        for idx, model in enumerate(models_config):
-            if not isinstance(model, dict):
-                continue
-            ip_routing = model.get('ip_routing')
-            if ip_routing is None:
-                continue
+        _validate_ip_routing(models_config, clients_config)
 
-            model_display = model.get('custom_name') or model.get('name', f'models[{idx}]')
-
-            if not isinstance(ip_routing, list):
-                raise ValueError(f"Model '{model_display}': 'ip_routing' must be a list")
-
-            seen_ips = set()
-            for rule_idx, rule in enumerate(ip_routing):
-                if not isinstance(rule, dict):
-                    raise ValueError(
-                        f"Model '{model_display}': ip_routing[{rule_idx}] must be a dict")
-
-                ip_value = rule.get('ip')
-                if not ip_value or not isinstance(ip_value, str) or not ip_value.strip():
-                    raise ValueError(
-                        f"Model '{model_display}': ip_routing[{rule_idx}] "
-                        f"must have a non-empty 'ip' field (alias name or direct IP)")
-
-                ip_value = ip_value.strip()
-                rule['ip'] = ip_value
-
-                # Resolve to actual IPs for duplicate checking
-                if clients_config and ip_value in clients_config:
-                    resolved = clients_config[ip_value]
-                    resolved_ips = [resolved] if isinstance(resolved, str) else resolved
-                else:
-                    resolved_ips = [ip_value]
-
-                for ip in resolved_ips:
-                    if ip in seen_ips:
-                        raise ValueError(
-                            f"Model '{model_display}': duplicate IP '{ip}' in ip_routing")
-                    seen_ips.add(ip)
-
-                if 'params' in rule and rule['params'] is not None:
-                    if not isinstance(rule['params'], dict):
-                        raise ValueError(
-                            f"Model '{model_display}': ip_routing[{rule_idx}] 'params' must be a dict")
-
-                if 'headers' in rule and rule['headers'] is not None:
-                    if not isinstance(rule['headers'], dict):
-                        raise ValueError(
-                            f"Model '{model_display}': ip_routing[{rule_idx}] 'headers' must be a dict")
-
-                # Warn about unrecognized keys (likely misplaced params like temperature)
-                recognized_keys = {'ip', 'name', 'system_prompt', 'remove_thinking_tags', 'prompt_caching', 'params', 'headers'}
-                unknown_keys = set(rule.keys()) - recognized_keys
-                if unknown_keys:
-                    state.logger.warning(
-                        f"Model '{model_display}': ip_routing[{rule_idx}] has unrecognized keys "
-                        f"{unknown_keys}. These will be ignored. "
-                        f"Did you mean to put them inside 'params'?")
-
-    # Validate tracing section
-    tracing_config = config.get('tracing')
+    tracing_config = config.get("tracing")
     if tracing_config is not None:
-        if not isinstance(tracing_config, dict):
-            raise ValueError("'tracing' must be a dict")
-        for flag in ('enabled', 'log_headers', 'send_trace_headers'):
-            if flag in tracing_config and not isinstance(tracing_config[flag], bool):
-                raise ValueError(f"tracing.{flag} must be a boolean (true/false)")
-        for field in ('trace_id_prefix', 'tags'):
-            if field in tracing_config and not isinstance(tracing_config[field], str):
-                raise ValueError(f"tracing.{field} must be a string")
+        _validate_tracing(tracing_config)
 
     return config
 
 
-def _configure_log_format(config):
+def _configure_log_format(config: dict) -> None:
     """Configure log format and filters based on tracing config.
-    When tracing is enabled, adds [request_id|trace_id] to every log line."""
+
+    When tracing is enabled, adds [request_id|trace_id] to every log line.
+    """
     root_logger = logging.getLogger()
-    log_level = getattr(logging, config.get('logging', {}).get('log_level', 'INFO').upper(), logging.INFO)
+    log_level = getattr(logging, config.get("logging", {}).get("log_level", "INFO").upper(), logging.INFO)
     root_logger.setLevel(log_level)
 
-    tracing_on = config.get('tracing', {}).get('enabled', False)
+    tracing_on = config.get("tracing", {}).get("enabled", False)
 
     if tracing_on:
-        fmt = '%(asctime)s - %(levelname)s - [%(trace_context)s] %(message)s'
+        fmt = "%(asctime)s - %(levelname)s - [%(trace_context)s] %(message)s"
     else:
-        fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
     formatter = logging.Formatter(fmt)
 
@@ -162,69 +217,69 @@ def _configure_log_format(config):
             handler.addFilter(TraceContextFilter())
 
 
-def init_state(config_path='config.yml'):
+def init_state(config_path: str = "config.yml") -> None:
     """Initialize all global state: load config, create OpenAI client, configure logging."""
-    state._config_file_path = config_path
+    state.config_file_path = config_path
 
     try:
         state.CONFIG = load_config(config_path)
-    except Exception as e:
-        state.logger.error(f"Failed to load config: {e}")
+    except (ValueError, TypeError, yaml.YAMLError, OSError) as e:
+        state.logger.error("Failed to load config: %s", e)
         sys.exit(1)
 
     _configure_log_format(state.CONFIG)
 
     try:
         state.client = OpenAI(
-            api_key=state.CONFIG['openai']['api_key'],
-            base_url=state.CONFIG['openai'].get('base_url', 'https://api.openai.com/v1')
+            api_key=state.CONFIG["openai"]["api_key"],
+            base_url=state.CONFIG["openai"].get("base_url", "https://api.openai.com/v1"),
         )
-    except Exception as e:
-        state.logger.error(f"Error initializing OpenAI client: {e}")
+    except (ValueError, TypeError) as e:
+        state.logger.error("Error initializing OpenAI client: %s", e)
         sys.exit(1)
 
     try:
-        state._last_config_mtime = os.path.getmtime(config_path)
+        state.last_config_mtime = Path(config_path).stat().st_mtime
     except OSError:
-        state._last_config_mtime = 0.0
+        state.last_config_mtime = 0.0
 
 
-def _check_and_reload_config():
-    """Check config.yml mtime; reload everything from scratch if changed.
-    Thread-safe: uses _config_reload_lock to prevent concurrent reloads."""
-    from ollama_adapter.models import get_and_cache_models
+def check_and_reload_config() -> None:
+    """Check config.yml mtime and reload everything from scratch if changed.
+
+    Thread-safe: uses config_reload_lock to prevent concurrent reloads.
+    """
+    from ollama_adapter.models import get_and_cache_models  # noqa: PLC0415
 
     try:
-        current_mtime = os.path.getmtime(state._config_file_path)
+        current_mtime = Path(state.config_file_path).stat().st_mtime
     except OSError:
         return
 
-    if current_mtime == state._last_config_mtime:
+    if current_mtime == state.last_config_mtime:
         return
 
-    with state._config_reload_lock:
-        # Re-check after acquiring lock (another thread may have reloaded already)
-        if current_mtime == state._last_config_mtime:
+    with state.config_reload_lock:
+        if current_mtime == state.last_config_mtime:
             return
 
-        state._last_config_mtime = current_mtime
+        state.last_config_mtime = current_mtime
 
         try:
-            new_config = load_config(state._config_file_path)
-        except Exception as e:
-            state.logger.warning(f"Config reload failed, keeping current config: {e}")
+            new_config = load_config(state.config_file_path)
+        except (ValueError, TypeError, yaml.YAMLError, OSError) as e:
+            state.logger.warning("Config reload failed, keeping current config: %s", e)
             return
 
         try:
             new_client = OpenAI(
-                api_key=new_config['openai']['api_key'],
-                base_url=new_config['openai'].get('base_url', 'https://api.openai.com/v1')
+                api_key=new_config["openai"]["api_key"],
+                base_url=new_config["openai"].get("base_url", "https://api.openai.com/v1"),
             )
-        except Exception as e:
-            state.logger.warning(f"Failed to recreate OpenAI client: {e}")
+        except (ValueError, TypeError) as e:
+            state.logger.warning("Failed to recreate OpenAI client: %s", e)
             return
 
-        # Atomic swap: update all globals together
         state.CONFIG = new_config
         state.client = new_client
 
@@ -232,8 +287,8 @@ def _check_and_reload_config():
 
         try:
             get_and_cache_models(force_refresh=True)
-        except Exception as e:
-            state.logger.warning(f"Failed to rebuild model cache: {e}")
+        except (OSError, RuntimeError) as e:
+            state.logger.warning("Failed to rebuild model cache: %s", e)
 
-        state._last_config_reload_time = datetime.now().isoformat() + "Z"
+        state.last_config_reload_time = datetime.now(tz=UTC).isoformat()
         state.logger.info("Config changed, reloaded")

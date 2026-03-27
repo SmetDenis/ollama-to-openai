@@ -1,14 +1,28 @@
-import os
-from datetime import datetime
+"""Model configuration, resolution, caching, and prompt handling."""
+
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from ollama_adapter import state
 
+_EVAL_DURATION_RATIO = 0.9
 
-def resolve_system_prompt(value):
-    """
-    Resolve system_prompt value to actual prompt text.
-    If value ends with '.md', reads content from file (relative to CWD).
-    Otherwise returns the string as-is.
+_MODEL_DETAILS: dict[str, Any] = {
+    "parent_model": "",
+    "format": "gguf",
+    "family": "llama",
+    "families": ["llama"],
+    "parameter_size": "8.0B",
+    "quantization_level": "Q4_0",
+}
+
+
+def resolve_system_prompt(value: str | None) -> str | None:
+    """Resolve system_prompt value to actual prompt text.
+
+    If value ends with '.md', read content from file (relative to CWD).
+    Otherwise return the string as-is.
     """
     if not value or not isinstance(value, str):
         return None
@@ -17,33 +31,32 @@ def resolve_system_prompt(value):
     if not value:
         return None
 
-    if value.endswith('.md'):
-        file_path = value if os.path.isabs(value) else os.path.join(os.getcwd(), value)
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-        return content if content else None
+    if value.endswith(".md"):
+        file_path = Path(value) if Path(value).is_absolute() else Path.cwd() / value
+        content = file_path.read_text(encoding="utf-8").strip()
+        return content or None
 
     return value
 
 
-def apply_system_prompt(messages, adapter_params, model_id):
+def apply_system_prompt(messages: list[dict], adapter_params: dict, model_id: str) -> list[dict]:
+    """Apply system prompt from model config to messages list.
+
+    If config has system_prompt and request has system message, replace it.
+    If config has system_prompt but no system message, prepend it.
+    If config has no system_prompt, return messages unchanged.
     """
-    Apply system prompt from model config to messages list.
-    If config has system_prompt and request has system message — replaces it.
-    If config has system_prompt and request has no system message — prepends it.
-    If config has no system_prompt — returns messages unchanged.
-    """
-    system_prompt_value = adapter_params.get('system_prompt')
+    system_prompt_value = adapter_params.get("system_prompt")
     if not system_prompt_value:
         return messages
 
     try:
         resolved = resolve_system_prompt(system_prompt_value)
     except FileNotFoundError:
-        state.logger.error(f"System prompt file not found for model '{model_id}': {system_prompt_value}")
+        state.logger.error("System prompt file not found for model '%s': %s", model_id, system_prompt_value)
         return messages
-    except Exception as e:
-        state.logger.error(f"Failed to read system prompt for model '{model_id}': {e}")
+    except OSError as e:
+        state.logger.error("Failed to read system prompt for model '%s': %s", model_id, e)
         return messages
 
     if not resolved:
@@ -54,167 +67,162 @@ def apply_system_prompt(messages, adapter_params, model_id):
 
     system_idx = None
     for i, msg in enumerate(result):
-        if isinstance(msg, dict) and msg.get('role') == 'system':
+        if isinstance(msg, dict) and msg.get("role") == "system":
             system_idx = i
             break
 
     if system_idx is not None:
         result[system_idx] = system_msg
-        state.logger.debug(f"Replaced system message for model '{model_id}' with config system_prompt")
+        state.logger.debug("Replaced system message for model '%s' with config system_prompt", model_id)
     else:
         result.insert(0, system_msg)
-        state.logger.debug(f"Prepended system message for model '{model_id}' from config system_prompt")
+        state.logger.debug("Prepended system message for model '%s' from config system_prompt", model_id)
 
     return result
 
 
-def apply_prompt_caching(messages, adapter_params, model_id):
+def apply_prompt_caching(messages: list[dict], adapter_params: dict, model_id: str) -> list[dict]:
+    """Add cache_control markers to system message content for provider-side prompt caching.
+
+    Enable prompt caching on Anthropic and Google Gemini via LiteLLM.
     """
-    Add cache_control markers to system message content for provider-side prompt caching.
-    Enables prompt caching on Anthropic and Google Gemini via LiteLLM.
-    """
-    if not adapter_params.get('prompt_caching'):
+    if not adapter_params.get("prompt_caching"):
         return messages
 
     result = list(messages)
 
     for i, msg in enumerate(result):
-        if not isinstance(msg, dict) or msg.get('role') != 'system':
+        if not isinstance(msg, dict) or msg.get("role") != "system":
             continue
 
-        content = msg.get('content')
+        content = msg.get("content")
         if not content or not isinstance(content, str):
             continue
 
         result[i] = {
             "role": "system",
-            "content": [{
-                "type": "text",
-                "text": content,
-                "cache_control": {"type": "ephemeral"}
-            }]
+            "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
         }
-        state.logger.debug(
-            f"Added cache_control to system message for model '{model_id}' "
-            f"({len(content)} chars)"
-        )
+        state.logger.debug("Added cache_control to system message for model '%s' (%d chars)", model_id, len(content))
         break
 
     return result
 
 
-def get_display_name(original_name):
-    """Returns custom_name if set, otherwise original_name."""
-    models_config = state.CONFIG.get('models', [])
+def get_display_name(original_name: str) -> str:
+    """Return custom_name if set, otherwise original_name."""
+    models_config = state.CONFIG.get("models", [])
     for model in models_config:
-        if isinstance(model, dict) and model.get('name') == original_name and 'custom_name' in model:
-            return model['custom_name']
+        if isinstance(model, dict) and model.get("name") == original_name and "custom_name" in model:
+            return model["custom_name"]
     return original_name
 
 
-def resolve_model_name(client_name):
+def resolve_model_name(client_name: str) -> str:
+    """Resolve model name from client to original OpenAI name.
+
+    Work with both custom_name and original names as synonyms.
     """
-    Resolves model name from client to original OpenAI name.
-    Works with both custom_name and original names as synonyms.
-    """
-    models_config = state.CONFIG.get('models', [])
+    models_config = state.CONFIG.get("models", [])
 
     for model in models_config:
-        if isinstance(model, dict) and model.get('custom_name') == client_name:
-            return model['name']
+        if isinstance(model, dict) and model.get("custom_name") == client_name:
+            return model["name"]
 
     return client_name
 
 
-def get_and_cache_models(force_refresh=False):
-    """
-    Fetches, filters, maps and caches model list.
-    Updated according to Ollama API documentation.
-    """
+def get_and_cache_models(*, force_refresh: bool = False) -> list[dict]:
+    """Fetch, filter, map and cache model list from OpenAI API."""
     if state.CACHED_MODELS and not force_refresh:
         return state.CACHED_MODELS
 
     action = "Refreshing" if force_refresh else "Requesting"
-    state.logger.info(f"Model cache: {action} model list from OpenAI...")
+    state.logger.info("Model cache: %s model list from OpenAI...", action)
     try:
         all_models_response = state.client.models.list().data
-        models_config = state.CONFIG.get('models', [])
-
-        model_details = {
-            "parent_model": "",
-            "format": "gguf",
-            "family": "llama",
-            "families": ["llama"],
-            "parameter_size": "8.0B",
-            "quantization_level": "Q4_0",
-        }
-
-        new_models = []
-        if models_config:
-            openai_models_by_id = {m.id: m for m in all_models_response}
-
-            for model_entry in models_config:
-                model_name = model_entry.get('name') if isinstance(model_entry, dict) else None
-                if not model_name or model_name not in openai_models_by_id:
-                    continue
-                openai_model = openai_models_by_id[model_name]
-                display_name = model_entry.get('custom_name', model_name)
-                new_models.append({
-                    "name": display_name,
-                    "model": display_name,
-                    "modified_at": datetime.fromtimestamp(openai_model.created).isoformat() + "Z",
-                    "size": 0,
-                    "digest": model_name,
-                    "details": model_details,
-                })
-        else:
-            for model in all_models_response:
-                new_models.append({
-                    "name": model.id,
-                    "model": model.id,
-                    "modified_at": datetime.fromtimestamp(model.created).isoformat() + "Z",
-                    "size": 0,
-                    "digest": model.id,
-                    "details": model_details,
-                })
-
-        state.CACHED_MODELS = new_models
-        state.logger.info(f"Models successfully loaded and cached. Found: {len(state.CACHED_MODELS)}")
-        return state.CACHED_MODELS
-    except Exception as e:
-        state.logger.error(f"Critical error getting models from OpenAI: {e}")
+        models_config = state.CONFIG.get("models", [])
+        new_models = _build_model_list(all_models_response, models_config)
+    except Exception:  # noqa: BLE001
+        state.logger.exception("Critical error getting models from OpenAI")
         if force_refresh:
             state.logger.warning("Keeping previous model cache after refresh failure")
             return state.CACHED_MODELS
         return []
+    else:
+        state.CACHED_MODELS = new_models
+        state.logger.info("Models successfully loaded and cached. Found: %d", len(state.CACHED_MODELS))
+        return state.CACHED_MODELS
 
 
-def resolve_ip_list(ip_value):
+def _build_model_list(all_models_response: Any, models_config: list[dict]) -> list[dict]:
+    """Build the Ollama-format model list from OpenAI models."""
+    if models_config:
+        return _build_filtered_model_list(all_models_response, models_config)
+    return [
+        {
+            "name": model.id,
+            "model": model.id,
+            "modified_at": datetime.fromtimestamp(model.created, tz=UTC).isoformat(),
+            "size": 0,
+            "digest": model.id,
+            "details": _MODEL_DETAILS,
+        }
+        for model in all_models_response
+    ]
+
+
+def _build_filtered_model_list(all_models_response: Any, models_config: list[dict]) -> list[dict]:
+    """Build model list filtered by configured model entries."""
+    openai_models_by_id = {m.id: m for m in all_models_response}
+    new_models: list[dict] = []
+
+    for model_entry in models_config:
+        model_name = model_entry.get("name") if isinstance(model_entry, dict) else None
+        if not model_name or model_name not in openai_models_by_id:
+            continue
+        openai_model = openai_models_by_id[model_name]
+        display_name = model_entry.get("custom_name", model_name)
+        new_models.append(
+            {
+                "name": display_name,
+                "model": display_name,
+                "modified_at": datetime.fromtimestamp(openai_model.created, tz=UTC).isoformat(),
+                "size": 0,
+                "digest": model_name,
+                "details": _MODEL_DETAILS,
+            }
+        )
+
+    return new_models
+
+
+def resolve_ip_list(ip_value: str) -> list[str]:
     """Resolve an ip_routing 'ip' field to a list of IP addresses.
-    If ip_value matches a key in CONFIG['clients'], returns that client group's IPs.
-    Otherwise treats ip_value as a direct IP address."""
-    clients = state.CONFIG.get('clients', {}) or {}
-    if isinstance(ip_value, str) and ip_value in clients:
+
+    If ip_value matches a key in CONFIG['clients'], return that client group's IPs.
+    Otherwise treat ip_value as a direct IP address.
+    """
+    clients: dict = state.CONFIG.get("clients", {}) or {}
+    if ip_value in clients:
         client_ips = clients[ip_value]
-        if isinstance(client_ips, str):
-            return [client_ips]
-        return list(client_ips)
-    if isinstance(ip_value, str):
-        return [ip_value]
-    return []
+        return [client_ips] if isinstance(client_ips, str) else list(client_ips)
+    return [ip_value]
 
 
-def apply_ip_routing(model_entry, client_ip):
+def apply_ip_routing(model_entry: dict, client_ip: str) -> dict:
     """Apply IP-based routing overrides to a model config entry.
-    Returns a new dict with overrides merged; does not mutate the original.
-    Scalar fields are replaced. Dict fields (params, headers) are shallow-merged."""
-    ip_routing = model_entry.get('ip_routing')
+
+    Return a new dict with overrides merged; does not mutate the original.
+    Scalar fields are replaced. Dict fields (params, headers) are shallow-merged.
+    """
+    ip_routing = model_entry.get("ip_routing")
     if not ip_routing or not client_ip:
         return model_entry
 
     matching_rule = None
     for rule in ip_routing:
-        resolved_ips = resolve_ip_list(rule.get('ip', ''))
+        resolved_ips = resolve_ip_list(rule.get("ip", ""))
         if client_ip in resolved_ips:
             matching_rule = rule
             break
@@ -223,13 +231,13 @@ def apply_ip_routing(model_entry, client_ip):
         return model_entry
 
     merged = dict(model_entry)
-    merged.pop('ip_routing', None)
+    merged.pop("ip_routing", None)
 
-    for key in ('name', 'system_prompt', 'remove_thinking_tags', 'prompt_caching'):
+    for key in ("name", "system_prompt", "remove_thinking_tags", "prompt_caching"):
         if key in matching_rule:
             merged[key] = matching_rule[key]
 
-    for key in ('params', 'headers'):
+    for key in ("params", "headers"):
         if key in matching_rule:
             parent_dict = dict(model_entry.get(key, {}) or {})
             override_dict = matching_rule[key]
@@ -238,68 +246,72 @@ def apply_ip_routing(model_entry, client_ip):
             merged[key] = parent_dict
 
     state.logger.info(
-        f"IP routing applied: client_ip={client_ip}, "
-        f"model='{model_entry.get('custom_name') or model_entry.get('name')}', "
-        f"routed_to='{merged.get('name')}'"
+        "IP routing applied: client_ip=%s, model='%s', routed_to='%s'",
+        client_ip,
+        model_entry.get("custom_name") or model_entry.get("name"),
+        merged.get("name"),
     )
 
     return merged
 
 
-def get_model_config(model_id, client_ip=None):
-    """
-    Returns model configuration split into OpenAI params, adapter params, and headers.
-    If client_ip is provided, applies IP-based routing overrides.
-    """
-    models_config = state.CONFIG.get('models', [])
+def get_model_config(model_id: str, *, client_ip: str | None = None) -> tuple[dict, dict, dict]:
+    """Return model configuration split into OpenAI params, adapter params, and headers.
 
+    If client_ip is provided, apply IP-based routing overrides.
+    """
+    models_config = state.CONFIG.get("models", [])
     original_name = resolve_model_name(model_id)
 
-    # Find model entry: prefer match by custom_name, then fall back to original name
-    model_entry = None
-    for model_config in models_config:
-        if isinstance(model_config, dict) and model_config.get('custom_name') == model_id:
-            model_entry = model_config
-            break
+    model_entry = _find_model_entry(models_config, model_id, original_name)
 
     if model_entry is None:
-        for model_config in models_config:
-            if isinstance(model_config, dict) and model_config.get('name') == original_name:
-                model_entry = model_config
-                break
-
-    if model_entry is None:
-        return {'model_id': original_name}, {}, {}
+        return {"model_id": original_name}, {}, {}
 
     if client_ip:
         model_entry = apply_ip_routing(model_entry, client_ip)
 
-    adapter_params = {}
-    if 'remove_thinking_tags' in model_entry:
-        adapter_params['remove_thinking_tags'] = model_entry['remove_thinking_tags']
-    if 'system_prompt' in model_entry:
-        adapter_params['system_prompt'] = model_entry['system_prompt']
-    if 'prompt_caching' in model_entry:
-        adapter_params['prompt_caching'] = model_entry['prompt_caching']
+    adapter_params: dict[str, Any] = {}
+    for adapter_key in ("remove_thinking_tags", "system_prompt", "prompt_caching"):
+        if adapter_key in model_entry:
+            adapter_params[adapter_key] = model_entry[adapter_key]
 
-    openai_params = dict(model_entry.get('params', {}) or {})
-    openai_params['model_id'] = model_entry.get('name', original_name)
+    openai_params: dict[str, Any] = dict(model_entry.get("params", {}) or {})
+    openai_params["model_id"] = model_entry.get("name", original_name)
 
-    headers = dict(model_entry.get('headers', {}) or {})
+    headers: dict[str, str] = dict(model_entry.get("headers", {}) or {})
 
     return openai_params, adapter_params, headers
 
 
-def create_final_response(model_name, prompt_tokens, completion_tokens, total_duration_ns):
-    """Helper function for creating final response in Ollama format."""
+def _find_model_entry(models_config: list[dict], model_id: str, original_name: str) -> dict | None:
+    """Find model entry by custom_name first, then by original name."""
+    for model_config in models_config:
+        if isinstance(model_config, dict) and model_config.get("custom_name") == model_id:
+            return model_config
+
+    for model_config in models_config:
+        if isinstance(model_config, dict) and model_config.get("name") == original_name:
+            return model_config
+
+    return None
+
+
+def create_final_response(
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_duration_ns: int,
+) -> dict:
+    """Create final response dict in Ollama format."""
     return {
         "model": model_name,
-        "created_at": datetime.now().isoformat() + "Z",
+        "created_at": datetime.now(tz=UTC).isoformat(),
         "done": True,
         "prompt_eval_count": prompt_tokens,
         "eval_count": completion_tokens,
         "total_duration": total_duration_ns,
         "load_duration": 0,
         "prompt_eval_duration": 0,
-        "eval_duration": int(total_duration_ns * 0.9) if total_duration_ns > 0 else 0
+        "eval_duration": int(total_duration_ns * _EVAL_DURATION_RATIO) if total_duration_ns > 0 else 0,
     }

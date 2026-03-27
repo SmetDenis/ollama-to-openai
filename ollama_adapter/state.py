@@ -1,13 +1,17 @@
+"""Global shared state for the Ollama-to-OpenAI adapter."""
+
 import logging
 import threading
 
-CONFIG = {}
-client = None
-CACHED_MODELS = []
+from openai import OpenAI
 
-_config_file_path = 'config.yml'
-_last_config_mtime = 0.0
-_last_config_reload_time = None
-_config_reload_lock = threading.Lock()
+CONFIG: dict = {}
+client: OpenAI | None = None
+CACHED_MODELS: list[dict] = []
 
-logger = logging.getLogger('ollama_adapter')
+config_file_path: str = "config.yml"
+last_config_mtime: float = 0.0
+last_config_reload_time: str | None = None
+config_reload_lock: threading.Lock = threading.Lock()
+
+logger: logging.Logger = logging.getLogger("ollama_adapter")
