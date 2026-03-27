@@ -8,38 +8,48 @@ Ollama-to-OpenAI adapter — Python-сервис (Flask), который тра�
 
 ## Architecture
 
-Всё приложение — **один файл** `ollama_to_openai_adapter.py` (~1900 строк). Зависимости: Flask, OpenAI SDK, PyYAML.
+Модульная структура в пакете `ollama_adapter/`. Зависимости: Flask, OpenAI SDK, PyYAML.
+
+### Module Structure
+
+```
+ollama_adapter/
+  __init__.py          # Пустой
+  __main__.py          # Entrypoint: create_app + app.run
+  state.py             # Глобальное состояние: CONFIG, client, CACHED_MODELS
+  config.py            # load_config(), init_state(), hot-reload
+  logging_utils.py     # TraceContextFilter, validation, log_request/response, @log_endpoint
+  tracing.py           # LiteLLM headers, build_trace_*, capture/log headers
+  thinking.py          # remove_thinking_tags(), _process_stream() — 5-state machine
+  models.py            # Модели, промпты, IP-routing, конфиг моделей
+  routes.py            # Flask Blueprint, все endpoints, shared completion helper
+  app.py               # create_app() factory, before_request hooks
+```
+
+### Import Graph
+
+`state.py` — лист графа (ничего не импортирует из пакета). Все модули импортируют `state`. `routes.py` импортирует `logging_utils`, `tracing`, `thinking`, `models`. `config.py` импортирует `logging_utils` (TraceContextFilter) и `models` (get_and_cache_models при reload). Циклических зависимостей нет.
 
 ### Request Flow
 
-1. `@app.before_request` — проверяет mtime `config.yml`, при изменении перезагружает конфиг, пересоздаёт OpenAI-клиент, обновляет кеш моделей
-2. `@log_endpoint` декоратор — логирует запрос/ответ, замеряет время
-3. Endpoint handler — валидация входных данных, получение конфига модели, вызов OpenAI API, форматирование ответа в формат Ollama
+1. `@app.before_request` (`app.py`) — проверяет mtime `config.yml`, при изменении перезагружает конфиг, пересоздаёт OpenAI-клиент, обновляет кеш моделей
+2. `@log_endpoint` декоратор (`logging_utils.py`) — логирует запрос/ответ, замеряет время
+3. Endpoint handler (`routes.py`) — валидация входных данных, получение конфига модели, вызов OpenAI API, форматирование ответа в формат Ollama
 4. Если tracing включён — `@app.before_request` генерирует `request_id`/`trace_id`, которые попадают в логи через `TraceContextFilter`
 
 ### Key Functions
 
-- **`get_model_config(model_id, client_ip)`** — центральная функция конфигурации. Возвращает кортеж `(openai_params, adapter_params, headers)`:
-  - `openai_params` — параметры для OpenAI API (temperature, max_tokens и т.д.) + `model_id`
-  - `adapter_params` — настройки адаптера (remove_thinking_tags, system_prompt, prompt_caching)
-  - `headers` — кастомные HTTP-заголовки для OpenAI API
-- **`resolve_model_name(client_name)`** — преобразует custom_name в оригинальный OpenAI model ID
-- **`get_display_name(original_name)`** — обратное преобразование для ответов клиентам
-- **`apply_ip_routing(model_entry, client_ip)`** — применяет IP-специфичные override'ы; shallow merge для dict-полей (params, headers)
-- **`get_and_cache_models()`** — загружает модели из OpenAI API, кеширует в `CACHED_MODELS` с синтетическими метаданными Ollama-формата
-- **`apply_system_prompt(messages, adapter_params, model_id)`** — внедряет системный промпт из конфига
-- **`resolve_system_prompt(value)`** — если значение заканчивается на `.md`, читает файл при каждом запросе (hot-reload промптов без рестарта)
-- **`apply_prompt_caching(messages, adapter_params, model_id)`** — добавляет `cache_control` маркеры в system message для Anthropic/Gemini через LiteLLM
-- **`remove_thinking_tags(content, model_id, remove_enabled)`** — удаление `<think>`/`<thinking>` тегов (regex для non-streaming)
-
-### Streaming Thinking Tag Removal
-
-Для стриминга используется **5-state machine** (определена inline в `chat()` и `generate()`):
-1. `INITIAL` — захват первого chunk'а
-2. `DETECTING_OPEN_TAG` — поиск открывающего `<think>`/`<thinking>`
-3. `BUFFERING_THINKING` — накопление содержимого до `</`
-4. `DETECTING_CLOSE_TAG` — поиск закрывающего тега
-5. `STREAMING_NORMAL` — прямая трансляция остального контента
+- **`get_model_config(model_id, client_ip)`** (`models.py`) — центральная функция конфигурации. Возвращает кортеж `(openai_params, adapter_params, headers)`
+- **`resolve_model_name(client_name)`** (`models.py`) — преобразует custom_name в оригинальный OpenAI model ID
+- **`get_display_name(original_name)`** (`models.py`) — обратное преобразование для ответов клиентам
+- **`apply_ip_routing(model_entry, client_ip)`** (`models.py`) — применяет IP-специфичные override'ы; shallow merge для dict-полей
+- **`get_and_cache_models()`** (`models.py`) — загружает модели из OpenAI API, кеширует в `state.CACHED_MODELS`
+- **`apply_system_prompt(messages, adapter_params, model_id)`** (`models.py`) — внедряет системный промпт из конфига
+- **`resolve_system_prompt(value)`** (`models.py`) — если значение заканчивается на `.md`, читает файл при каждом запросе (hot-reload)
+- **`apply_prompt_caching(messages, adapter_params, model_id)`** (`models.py`) — добавляет `cache_control` маркеры для Anthropic/Gemini
+- **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — удаление `<think>`/`<thinking>` тегов
+- **`_process_stream()`** (`thinking.py`) — 5-state machine для streaming tag removal
+- **`_call_openai_streaming()`** / **`_call_openai_non_streaming()`** (`routes.py`) — shared-хелперы для `chat()` и `generate()`
 
 ### Prompts Directory
 
@@ -49,9 +59,9 @@ Ollama-to-OpenAI adapter — Python-сервис (Flask), который тра�
 
 ```bash
 # Запуск локально
-python3 ollama_to_openai_adapter.py
+python3 -m ollama_adapter
 # или через venv
-./.venv/bin/python3 ollama_to_openai_adapter.py
+./.venv/bin/python3 -m ollama_adapter
 
 # Docker Compose (порт 11345 -> 11434)
 docker-compose up -d

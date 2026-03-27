@@ -11,5 +11,5 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./prompts:/app/prompts:ro
-      - ./ollama_to_openai_adapter.py:/app/ollama_to_openai_adapter.py:ro
+      - ./ollama_adapter:/app/ollama_adapter:ro
     restart: unless-stopped

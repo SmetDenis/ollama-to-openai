@@ -8,4 +8,4 @@ COPY . /app
 RUN uv sync --frozen
 
 EXPOSE 11434
-CMD [".venv/bin/python", "ollama_to_openai_adapter.py"]
+CMD [".venv/bin/python", "-m", "ollama_adapter"]
