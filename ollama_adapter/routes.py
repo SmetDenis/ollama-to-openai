@@ -43,19 +43,20 @@ class _CompletionContext:
     model_id: str
     display_name: str
     original_name: str
-    messages: list[dict]
+    messages: list[dict[str, Any]]
     start_time: float
 
 
 def _call_openai_streaming(
     ctx: _CompletionContext,
-    make_chunk: Callable[[str, str], dict],
+    make_chunk: Callable[[str, str], dict[str, Any]],
     response_key: str,
 ) -> Response:
     """Execute a streaming completion call shared by chat() and generate()."""
     client_ip = get_client_ip()
 
     def generate_stream() -> Generator[str]:
+        assert state.client is not None  # noqa: S101
         raw_ctx = None
         try:
             openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
@@ -123,6 +124,7 @@ def _call_openai_streaming(
 
 def _call_openai_non_streaming(ctx: _CompletionContext, response_key: str) -> Response | tuple[Response, int]:
     """Execute a non-streaming completion call shared by chat() and generate()."""
+    assert state.client is not None  # noqa: S101
     client_ip = get_client_ip()
     openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
 
@@ -308,7 +310,7 @@ def chat() -> Response | tuple[Response, int]:
 
         if data.get("stream", False):
 
-            def make_chat_chunk(dn: str, content: str) -> dict:
+            def make_chat_chunk(dn: str, content: str) -> dict[str, Any]:
                 return {
                     "model": dn,
                     "created_at": datetime.now(tz=UTC).isoformat(),
@@ -361,7 +363,7 @@ def generate() -> Response | tuple[Response, int]:
 
         if data.get("stream", False):
 
-            def make_generate_chunk(dn: str, content: str) -> dict:
+            def make_generate_chunk(dn: str, content: str) -> dict[str, Any]:
                 return {
                     "model": dn,
                     "created_at": datetime.now(tz=UTC).isoformat(),
@@ -419,6 +421,7 @@ def embed() -> Response | tuple[Response, int]:
         if isinstance(input_text, str):
             input_text = [input_text]
 
+        assert state.client is not None  # noqa: S101
         merged_headers = build_trace_headers(extra_headers, display_name) or None
 
         if tracing_log_headers_enabled():
@@ -457,6 +460,7 @@ _HEALTH_CHECK_TIMEOUT = 5.0
 def health_check() -> tuple[Response, int]:
     """Verify service status and OpenAI connectivity."""
     try:
+        assert state.client is not None  # noqa: S101
         models = state.client.with_options(timeout=_HEALTH_CHECK_TIMEOUT).models.list()
         openai_status = "healthy" if models else "unhealthy"
 

@@ -13,7 +13,7 @@ from ollama_adapter import state
 from ollama_adapter.logging_utils import TraceContextFilter
 
 
-def _validate_required_fields(config: dict) -> None:
+def _validate_required_fields(config: dict[str, Any]) -> None:
     """Validate required top-level configuration fields exist."""
     if not config.get("openai", {}).get("api_key"):
         msg = "Missing required parameter 'openai.api_key' in config.yml"
@@ -26,14 +26,14 @@ def _validate_required_fields(config: dict) -> None:
         raise ValueError(msg)
 
 
-def _normalize_model_names(models_config: list[dict]) -> None:
+def _normalize_model_names(models_config: list[dict[str, Any]]) -> None:
     """Strip whitespace from custom_name values in-place."""
     for model in models_config:
         if isinstance(model, dict) and "custom_name" in model:
             model["custom_name"] = model["custom_name"].strip()
 
 
-def _validate_custom_name_uniqueness(models_config: list[dict]) -> None:
+def _validate_custom_name_uniqueness(models_config: list[dict[str, Any]]) -> None:
     """Ensure all custom_name values are unique across models."""
     custom_names = [
         model["custom_name"] for model in models_config if isinstance(model, dict) and "custom_name" in model
@@ -44,7 +44,7 @@ def _validate_custom_name_uniqueness(models_config: list[dict]) -> None:
         raise ValueError(msg)
 
 
-def _validate_clients(clients_config: dict) -> None:
+def _validate_clients(clients_config: Any) -> None:
     """Validate the clients section: alias -> IP mappings."""
     if not isinstance(clients_config, dict):
         msg = "'clients' must be a dict mapping alias names to IP addresses"
@@ -73,7 +73,7 @@ def _validate_single_ip_route(
     rule: Any,
     rule_idx: int,
     model_display: str,
-    clients_config: dict | None,
+    clients_config: dict[str, Any] | None,
     seen_ips: set[str],
 ) -> None:
     """Validate a single ip_routing rule entry."""
@@ -116,7 +116,7 @@ def _validate_single_ip_route(
         )
 
 
-def _resolve_ips_for_validation(ip_value: str, clients_config: dict | None) -> list[str]:
+def _resolve_ips_for_validation(ip_value: str, clients_config: dict[str, Any] | None) -> list[str]:
     """Resolve an IP value to a list of IPs for duplicate checking."""
     if clients_config and ip_value in clients_config:
         resolved = clients_config[ip_value]
@@ -124,7 +124,7 @@ def _resolve_ips_for_validation(ip_value: str, clients_config: dict | None) -> l
     return [ip_value]
 
 
-def _validate_ip_routing(models_config: list[dict], clients_config: dict | None) -> None:
+def _validate_ip_routing(models_config: list[Any], clients_config: dict[str, Any] | None) -> None:
     """Validate ip_routing entries in all model configurations."""
     for idx, model in enumerate(models_config):
         if not isinstance(model, dict):
@@ -144,7 +144,7 @@ def _validate_ip_routing(models_config: list[dict], clients_config: dict | None)
             _validate_single_ip_route(rule, rule_idx, model_display, clients_config, seen_ips)
 
 
-def _validate_tracing(tracing_config: dict) -> None:
+def _validate_tracing(tracing_config: Any) -> None:
     """Validate the tracing configuration section."""
     if not isinstance(tracing_config, dict):
         msg = "'tracing' must be a dict"
@@ -159,13 +159,13 @@ def _validate_tracing(tracing_config: dict) -> None:
             raise ValueError(msg)
 
 
-def load_config(path: str = "config.yml") -> dict:
+def load_config(path: str = "config.yml") -> dict[str, Any]:
     """Load and validate YAML configuration file.
 
     Raise ValueError/TypeError on validation errors.
     """
     with Path(path).open(encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config: dict[str, Any] = yaml.safe_load(f)
 
     _validate_required_fields(config)
 
@@ -188,7 +188,7 @@ def load_config(path: str = "config.yml") -> dict:
     return config
 
 
-def _configure_log_format(config: dict) -> None:
+def _configure_log_format(config: dict[str, Any]) -> None:
     """Configure log format and filters based on tracing config.
 
     When tracing is enabled, adds [request_id|trace_id] to every log line.
@@ -207,14 +207,14 @@ def _configure_log_format(config: dict) -> None:
     formatter = logging.Formatter(fmt)
 
     if not root_logger.handlers:
-        handler = logging.StreamHandler()
-        root_logger.addHandler(handler)
+        new_handler = logging.StreamHandler()
+        root_logger.addHandler(new_handler)
 
-    for handler in root_logger.handlers:
-        handler.setFormatter(formatter)
-        handler.filters = [f for f in handler.filters if not isinstance(f, TraceContextFilter)]
+    for h in root_logger.handlers:
+        h.setFormatter(formatter)
+        h.filters = [f for f in h.filters if not isinstance(f, TraceContextFilter)]
         if tracing_on:
-            handler.addFilter(TraceContextFilter())
+            h.addFilter(TraceContextFilter())
 
 
 def init_state(config_path: str = "config.yml") -> None:

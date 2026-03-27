@@ -39,7 +39,9 @@ def resolve_system_prompt(value: str | None) -> str | None:
     return value
 
 
-def apply_system_prompt(messages: list[dict], adapter_params: dict, model_id: str) -> list[dict]:
+def apply_system_prompt(
+    messages: list[dict[str, Any]], adapter_params: dict[str, Any], model_id: str
+) -> list[dict[str, Any]]:
     """Apply system prompt from model config to messages list.
 
     If config has system_prompt and request has system message, replace it.
@@ -81,7 +83,9 @@ def apply_system_prompt(messages: list[dict], adapter_params: dict, model_id: st
     return result
 
 
-def apply_prompt_caching(messages: list[dict], adapter_params: dict, model_id: str) -> list[dict]:
+def apply_prompt_caching(
+    messages: list[dict[str, Any]], adapter_params: dict[str, Any], model_id: str
+) -> list[dict[str, Any]]:
     """Add cache_control markers to system message content for provider-side prompt caching.
 
     Enable prompt caching on Anthropic and Google Gemini via LiteLLM.
@@ -114,7 +118,7 @@ def get_display_name(original_name: str) -> str:
     models_config = state.CONFIG.get("models", [])
     for model in models_config:
         if isinstance(model, dict) and model.get("name") == original_name and "custom_name" in model:
-            return model["custom_name"]
+            return str(model["custom_name"])
     return original_name
 
 
@@ -127,12 +131,12 @@ def resolve_model_name(client_name: str) -> str:
 
     for model in models_config:
         if isinstance(model, dict) and model.get("custom_name") == client_name:
-            return model["name"]
+            return str(model["name"])
 
     return client_name
 
 
-def get_and_cache_models(*, force_refresh: bool = False) -> list[dict]:
+def get_and_cache_models(*, force_refresh: bool = False) -> list[dict[str, Any]]:
     """Fetch, filter, map and cache model list from OpenAI API."""
     if state.CACHED_MODELS and not force_refresh:
         return state.CACHED_MODELS
@@ -140,6 +144,7 @@ def get_and_cache_models(*, force_refresh: bool = False) -> list[dict]:
     action = "Refreshing" if force_refresh else "Requesting"
     state.logger.info("Model cache: %s model list from OpenAI...", action)
     try:
+        assert state.client is not None  # noqa: S101
         all_models_response = state.client.models.list().data
         models_config = state.CONFIG.get("models", [])
         new_models = _build_model_list(all_models_response, models_config)
@@ -155,7 +160,7 @@ def get_and_cache_models(*, force_refresh: bool = False) -> list[dict]:
         return state.CACHED_MODELS
 
 
-def _build_model_list(all_models_response: Any, models_config: list[dict]) -> list[dict]:
+def _build_model_list(all_models_response: Any, models_config: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the Ollama-format model list from OpenAI models."""
     if models_config:
         return _build_filtered_model_list(all_models_response, models_config)
@@ -172,10 +177,10 @@ def _build_model_list(all_models_response: Any, models_config: list[dict]) -> li
     ]
 
 
-def _build_filtered_model_list(all_models_response: Any, models_config: list[dict]) -> list[dict]:
+def _build_filtered_model_list(all_models_response: Any, models_config: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build model list filtered by configured model entries."""
     openai_models_by_id = {m.id: m for m in all_models_response}
-    new_models: list[dict] = []
+    new_models: list[dict[str, Any]] = []
 
     for model_entry in models_config:
         model_name = model_entry.get("name") if isinstance(model_entry, dict) else None
@@ -203,14 +208,14 @@ def resolve_ip_list(ip_value: str) -> list[str]:
     If ip_value matches a key in CONFIG['clients'], return that client group's IPs.
     Otherwise treat ip_value as a direct IP address.
     """
-    clients: dict = state.CONFIG.get("clients", {}) or {}
+    clients: dict[str, Any] = state.CONFIG.get("clients", {}) or {}
     if ip_value in clients:
         client_ips = clients[ip_value]
         return [client_ips] if isinstance(client_ips, str) else list(client_ips)
     return [ip_value]
 
 
-def apply_ip_routing(model_entry: dict, client_ip: str) -> dict:
+def apply_ip_routing(model_entry: dict[str, Any], client_ip: str) -> dict[str, Any]:
     """Apply IP-based routing overrides to a model config entry.
 
     Return a new dict with overrides merged; does not mutate the original.
@@ -255,7 +260,9 @@ def apply_ip_routing(model_entry: dict, client_ip: str) -> dict:
     return merged
 
 
-def get_model_config(model_id: str, *, client_ip: str | None = None) -> tuple[dict, dict, dict]:
+def get_model_config(
+    model_id: str, *, client_ip: str | None = None
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
     """Return model configuration split into OpenAI params, adapter params, and headers.
 
     If client_ip is provided, apply IP-based routing overrides.
@@ -284,7 +291,7 @@ def get_model_config(model_id: str, *, client_ip: str | None = None) -> tuple[di
     return openai_params, adapter_params, headers
 
 
-def _find_model_entry(models_config: list[dict], model_id: str, original_name: str) -> dict | None:
+def _find_model_entry(models_config: list[dict[str, Any]], model_id: str, original_name: str) -> dict[str, Any] | None:
     """Find model entry by custom_name first, then by original name."""
     for model_config in models_config:
         if isinstance(model_config, dict) and model_config.get("custom_name") == model_id:
@@ -302,7 +309,7 @@ def create_final_response(
     prompt_tokens: int,
     completion_tokens: int,
     total_duration_ns: int,
-) -> dict:
+) -> dict[str, Any]:
     """Create final response dict in Ollama format."""
     return {
         "model": model_name,

@@ -12,3 +12,4 @@ format:
 check:
 	ruff format --check .
 	ruff check .
+	mypy ollama_adapter/

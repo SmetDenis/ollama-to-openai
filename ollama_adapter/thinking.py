@@ -59,7 +59,7 @@ _MAX_CLOSE_TAG_LENGTH = 15
 class _StreamProcessor:
     """State machine that removes thinking tags from a streaming response."""
 
-    def __init__(self, model_id: str, display_name: str, make_chunk: Callable[[str, str], dict]) -> None:
+    def __init__(self, model_id: str, display_name: str, make_chunk: Callable[[str, str], dict[str, Any]]) -> None:
         self._model_id = model_id
         self._display_name = display_name
         self._make_chunk = make_chunk
@@ -201,7 +201,7 @@ class StreamContext:
 
     model_id: str
     display_name: str
-    make_chunk: Callable[[str, str], dict]
+    make_chunk: Callable[[str, str], dict[str, Any]]
     remove_tags: bool = False
 
 

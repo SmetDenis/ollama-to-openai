@@ -1,5 +1,7 @@
 """Entry point for the Ollama-to-OpenAI adapter."""
 
+from typing import Any
+
 from ollama_adapter import state
 from ollama_adapter.app import create_app
 from ollama_adapter.models import get_and_cache_models
@@ -7,7 +9,7 @@ from ollama_adapter.models import get_and_cache_models
 app = create_app()
 get_and_cache_models()
 
-server_config: dict = state.CONFIG["server"]
+server_config: dict[str, Any] = state.CONFIG["server"]
 state.logger.info(
     "Starting Ollama -> OpenAI adapter on http://%s:%s",
     server_config["host"],

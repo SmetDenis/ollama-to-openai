@@ -25,17 +25,17 @@ class TraceContextFilter(logging.Filter):
             req_id = getattr(g, "request_id", None)
             trace_id = getattr(g, "trace_id", None)
             if req_id and trace_id:
-                record.trace_context = f"{req_id}|{trace_id}"  # type: ignore[attr-defined]
+                record.trace_context = f"{req_id}|{trace_id}"
             elif req_id:
-                record.trace_context = req_id  # type: ignore[attr-defined]
+                record.trace_context = req_id
             else:
-                record.trace_context = "-"  # type: ignore[attr-defined]
+                record.trace_context = "-"
         except RuntimeError:
-            record.trace_context = "-"  # type: ignore[attr-defined]
+            record.trace_context = "-"
         return True
 
 
-def validate_json_request() -> dict | tuple[Response, int]:
+def validate_json_request() -> dict[str, Any] | tuple[Response, int]:
     """Validate that request contains valid JSON.
 
     Return parsed data dict on success, or (error_response, status_code) on failure.
@@ -43,14 +43,14 @@ def validate_json_request() -> dict | tuple[Response, int]:
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
 
-    data = request.get_json()
+    data: dict[str, Any] = request.get_json()
     if not data:
         return jsonify({"error": "Request body cannot be empty"}), 400
 
     return data
 
 
-def validate_model_parameter(data: dict) -> str | tuple[Response, int]:
+def validate_model_parameter(data: dict[str, Any]) -> str | tuple[Response, int]:
     """Validate model parameter exists and is valid.
 
     Return cleaned model name on success, or (error_response, status_code) on failure.
@@ -140,7 +140,7 @@ def log_response(
         state.logger.info("Response: %s", log_data)
 
 
-def log_endpoint(f: Callable) -> Callable:
+def log_endpoint(f: Callable[..., Any]) -> Callable[..., Any]:
     """Decorate endpoint to log requests and responses."""
 
     @wraps(f)

@@ -21,16 +21,16 @@ LITELLM_RESPONSE_HEADERS = [
 
 def tracing_enabled() -> bool:
     """Check if the tracing master switch is on."""
-    return state.CONFIG.get("tracing", {}).get("enabled", False)
+    return bool(state.CONFIG.get("tracing", {}).get("enabled", False))
 
 
 def tracing_log_headers_enabled() -> bool:
     """Check if LiteLLM response header extraction is enabled."""
     tracing = state.CONFIG.get("tracing", {})
-    return tracing.get("enabled", False) and tracing.get("log_headers", False)
+    return bool(tracing.get("enabled", False)) and bool(tracing.get("log_headers", False))
 
 
-def build_trace_headers(extra_headers: dict | None, display_name: str | None = None) -> dict | None:
+def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str | None = None) -> dict[str, str] | None:
     """Merge LiteLLM tracing headers into extra_headers.
 
     Model-specific headers take precedence over tracing headers.
@@ -92,7 +92,7 @@ def capture_litellm_headers(headers: Any) -> None:
 def log_litellm_headers() -> None:
     """Log captured LiteLLM headers: compact at INFO, full at DEBUG."""
     try:
-        headers: dict = getattr(g, "litellm_response_headers", {})
+        headers: dict[str, str] = getattr(g, "litellm_response_headers", {})
     except RuntimeError:
         return
     if not headers:

@@ -2,12 +2,13 @@
 
 import logging
 import threading
+from typing import Any
 
 from openai import OpenAI
 
-CONFIG: dict = {}
+CONFIG: dict[str, Any] = {}
 client: OpenAI | None = None
-CACHED_MODELS: list[dict] = []
+CACHED_MODELS: list[dict[str, Any]] = []
 
 config_file_path: str = "config.yml"
 last_config_mtime: float = 0.0
