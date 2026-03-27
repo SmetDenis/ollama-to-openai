@@ -139,7 +139,7 @@ def log_endpoint(f):
             try:
                 data = request.get_json()
                 log_request(endpoint_path, request.method, data)
-            except:
+            except Exception:
                 log_request(endpoint_path, request.method)
         else:
             log_request(endpoint_path, request.method)
@@ -158,7 +158,7 @@ def log_endpoint(f):
                     try:
                         response_data = response.get_json()
                         log_response(endpoint_path, status_code, response_data)
-                    except:
+                    except Exception:
                         log_response(endpoint_path, status_code, None)
                 else:
                     log_response(endpoint_path, status_code, None)
@@ -172,7 +172,7 @@ def log_endpoint(f):
                     try:
                         response_data = result.get_json()
                         log_response(endpoint_path, status_code, response_data)
-                    except:
+                    except Exception:
                         log_response(endpoint_path, status_code, None)
                 elif isinstance(result, Response):
                     status_code = result.status_code
@@ -568,6 +568,15 @@ def load_config(path='config.yml'):
                     if not isinstance(rule['headers'], dict):
                         raise ValueError(
                             f"Model '{model_display}': ip_routing[{rule_idx}] 'headers' must be a dict")
+
+                # Warn about unrecognized keys (likely misplaced params like temperature)
+                recognized_keys = {'ip', 'name', 'system_prompt', 'remove_thinking_tags', 'prompt_caching', 'params', 'headers'}
+                unknown_keys = set(rule.keys()) - recognized_keys
+                if unknown_keys:
+                    logger.warning(
+                        f"Model '{model_display}': ip_routing[{rule_idx}] has unrecognized keys "
+                        f"{unknown_keys}. These will be ignored. "
+                        f"Did you mean to put them inside 'params'?")
 
     # Validate tracing section
     tracing_config = config.get('tracing')
@@ -1287,8 +1296,16 @@ def chat():
                                 "done": False
                             }) + '\n'
                         elif state in ["BUFFERING_THINKING", "DETECTING_CLOSE_TAG"]:
-                            # Malformed - missing closing tag
-                            logger.warning(f"Stream ended while buffering thinking content for model '{model_id}'. No closing tag found.")
+                            # Malformed - missing closing tag, output buffered content as fallback
+                            fallback = thinking_buffer + close_tag_buffer
+                            logger.warning(f"Stream ended while buffering thinking content for model '{model_id}'. No closing tag found. Outputting {len(fallback)} chars as fallback.")
+                            if fallback.strip():
+                                yield json.dumps({
+                                    "model": display_name,
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "message": {"role": "assistant", "content": fallback},
+                                    "done": False
+                                }) + '\n'
 
                     else:
                         # Feature disabled - simple pass-through
@@ -1635,8 +1652,16 @@ def generate():
                                 "done": False
                             }) + '\n'
                         elif state in ["BUFFERING_THINKING", "DETECTING_CLOSE_TAG"]:
-                            # Malformed - missing closing tag
-                            logger.warning(f"Stream ended while buffering thinking content for model '{model_id}'. No closing tag found.")
+                            # Malformed - missing closing tag, output buffered content as fallback
+                            fallback = thinking_buffer + close_tag_buffer
+                            logger.warning(f"Stream ended while buffering thinking content for model '{model_id}'. No closing tag found. Outputting {len(fallback)} chars as fallback.")
+                            if fallback.strip():
+                                yield json.dumps({
+                                    "model": display_name,
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "response": fallback,
+                                    "done": False
+                                }) + '\n'
 
                     else:
                         # Feature disabled - simple pass-through
@@ -1827,8 +1852,8 @@ def embed():
 def health_check():
     """Health check endpoint to verify service status."""
     try:
-        # Test OpenAI client connection
-        models = client.models.list()
+        # Test OpenAI client connection (with timeout to prevent hanging)
+        models = client.with_options(timeout=5.0).models.list()
         openai_status = "healthy" if models else "unhealthy"
 
         # Check if we have cached models
