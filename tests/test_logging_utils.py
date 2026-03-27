@@ -11,7 +11,6 @@ from ollama_adapter.logging_utils import (
     validate_model_parameter,
 )
 
-
 # ---------------------------------------------------------------------------
 # validate_json_request
 # ---------------------------------------------------------------------------
@@ -19,25 +18,19 @@ from ollama_adapter.logging_utils import (
 
 class TestValidateJsonRequest:
     def test_valid_json(self, app):
-        with app.test_request_context(
-            "/test", method="POST", json={"model": "gpt-4o"}
-        ):
+        with app.test_request_context("/test", method="POST", json={"model": "gpt-4o"}):
             result = validate_json_request()
             assert isinstance(result, dict)
             assert result["model"] == "gpt-4o"
 
     def test_not_json_content_type(self, app):
-        with app.test_request_context(
-            "/test", method="POST", data="plain text", content_type="text/plain"
-        ):
+        with app.test_request_context("/test", method="POST", data="plain text", content_type="text/plain"):
             result = validate_json_request()
             assert isinstance(result, tuple)
             assert result[1] == 400
 
     def test_empty_body(self, app):
-        with app.test_request_context(
-            "/test", method="POST", data="{}", content_type="application/json"
-        ):
+        with app.test_request_context("/test", method="POST", data="{}", content_type="application/json"):
             result = validate_json_request()
             assert isinstance(result, tuple)
             assert result[1] == 400
@@ -113,15 +106,11 @@ class TestGetClientIp:
             assert get_client_ip() == "127.0.0.1"
 
     def test_forwarded_for_priority(self, app):
-        with app.test_request_context(
-            headers={"X-Forwarded-For": "10.0.0.1", "X-Real-IP": "10.0.0.2"}
-        ):
+        with app.test_request_context(headers={"X-Forwarded-For": "10.0.0.1", "X-Real-IP": "10.0.0.2"}):
             assert get_client_ip() == "10.0.0.1"
 
     def test_empty_forwarded_for_falls_through(self, app):
-        with app.test_request_context(
-            headers={"X-Forwarded-For": "", "X-Real-IP": "10.0.0.5"}
-        ):
+        with app.test_request_context(headers={"X-Forwarded-For": "", "X-Real-IP": "10.0.0.5"}):
             assert get_client_ip() == "10.0.0.5"
 
 

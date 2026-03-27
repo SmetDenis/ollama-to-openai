@@ -1,11 +1,10 @@
 """Tests for ollama_adapter.routes module — all endpoints via Flask test client."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from ollama_adapter import state
 
-from .conftest import collect_stream, make_mock_completion, make_mock_embedding
-
+from .conftest import collect_stream, make_mock_chunk, make_mock_completion, make_mock_embedding
 
 # ---------------------------------------------------------------------------
 # GET /
@@ -125,10 +124,13 @@ class TestShow:
 class TestChatNonStreaming:
     def test_success(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.return_value = make_mock_completion("Hello!")
-        resp = client.post("/api/chat", json={
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["message"]["content"] == "Hello!"
@@ -154,29 +156,37 @@ class TestChatNonStreaming:
         response = make_mock_completion()
         response.choices = []
         mock_openai_client.chat.completions.create.return_value = response
-        resp = client.post("/api/chat", json={
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
         assert resp.status_code == 500
 
     def test_api_error_500(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
-        resp = client.post("/api/chat", json={
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
         assert resp.status_code == 500
 
     def test_thinking_removal(self, client, mock_openai_client, full_config):
+        full_config.pop("tracing", None)
         state.CONFIG = full_config
-        mock_openai_client.chat.completions.create.return_value = make_mock_completion(
-            "<think>reasoning</think>Answer"
+        mock_openai_client.chat.completions.create.return_value = make_mock_completion("<think>reasoning</think>Answer")
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "Mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
         )
-        resp = client.post("/api/chat", json={
-            "model": "Mini",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
         data = resp.get_json()
         assert data["message"]["content"] == "Answer"
 
@@ -191,16 +201,17 @@ class TestChatStreaming:
         mock_openai_client.chat.completions.create.return_value = iter(chunks)
 
     def test_success(self, client, mock_openai_client):
-        from tests.conftest import make_mock_chunk
-
         chunks = [make_mock_chunk("Hello"), make_mock_chunk(" world")]
         self._mock_stream(mock_openai_client, chunks)
 
-        resp = client.post("/api/chat", json={
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": True,
-        })
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
         assert resp.status_code == 200
         data = collect_stream(resp)
         assert len(data) >= 2
@@ -208,25 +219,27 @@ class TestChatStreaming:
         assert last["done"] is True
 
     def test_mimetype(self, client, mock_openai_client):
-        from tests.conftest import make_mock_chunk
-
         self._mock_stream(mock_openai_client, [make_mock_chunk("Hi")])
-        resp = client.post("/api/chat", json={
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": True,
-        })
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
         assert resp.content_type.startswith("application/x-ndjson")
 
     def test_final_chunk_has_done(self, client, mock_openai_client):
-        from tests.conftest import make_mock_chunk
-
         self._mock_stream(mock_openai_client, [make_mock_chunk("Hi")])
-        resp = client.post("/api/chat", json={
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": True,
-        })
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
         data = collect_stream(resp)
         last = data[-1]
         assert last["done"] is True
@@ -241,10 +254,13 @@ class TestChatStreaming:
 class TestGenerate:
     def test_non_streaming_success(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.return_value = make_mock_completion("Generated!")
-        resp = client.post("/api/generate", json={
-            "model": "gpt-4o",
-            "prompt": "Write a poem",
-        })
+        resp = client.post(
+            "/api/generate",
+            json={
+                "model": "gpt-4o",
+                "prompt": "Write a poem",
+            },
+        )
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["response"] == "Generated!"
@@ -259,14 +275,15 @@ class TestGenerate:
         assert resp.status_code == 400
 
     def test_streaming_success(self, client, mock_openai_client):
-        from tests.conftest import make_mock_chunk
-
         mock_openai_client.chat.completions.create.return_value = iter([make_mock_chunk("Hi")])
-        resp = client.post("/api/generate", json={
-            "model": "gpt-4o",
-            "prompt": "Write something",
-            "stream": True,
-        })
+        resp = client.post(
+            "/api/generate",
+            json={
+                "model": "gpt-4o",
+                "prompt": "Write something",
+                "stream": True,
+            },
+        )
         assert resp.status_code == 200
         data = collect_stream(resp)
         last = data[-1]
@@ -289,9 +306,7 @@ class TestEmbed:
         assert len(data["embeddings"]) == 1
 
     def test_success_list_input(self, client, mock_openai_client):
-        mock_openai_client.embeddings.create.return_value = make_mock_embedding(
-            [[0.1, 0.2], [0.3, 0.4]]
-        )
+        mock_openai_client.embeddings.create.return_value = make_mock_embedding([[0.1, 0.2], [0.3, 0.4]])
         resp = client.post("/api/embed", json={"model": "emb", "input": ["a", "b"]})
         assert resp.status_code == 200
         assert len(resp.get_json()["embeddings"]) == 2

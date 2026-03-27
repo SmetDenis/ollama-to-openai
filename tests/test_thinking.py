@@ -10,7 +10,6 @@ from ollama_adapter.thinking import StreamContext, process_stream, remove_thinki
 
 from .conftest import make_mock_chunk
 
-
 # ---------------------------------------------------------------------------
 # remove_thinking_tags (non-streaming)
 # ---------------------------------------------------------------------------
@@ -136,22 +135,24 @@ class TestStreamProcessor:
     def test_unclosed_tag_fallback(self):
         chunks = [
             make_mock_chunk("<think>"),
-            make_mock_chunk("reasoning without close"),
+            make_mock_chunk("reasoning"),
+            make_mock_chunk("</"),  # starts close detection but stream ends
         ]
         lines = _run_stream(chunks)
         content = _collect_content(lines)
-        assert "reasoning without close" in content
+        assert "reasoning" in content
 
     def test_thinking_with_remainder(self):
         chunks = [
             make_mock_chunk("<think>"),
-            make_mock_chunk("thinking"),
-            make_mock_chunk("</think>And the answer"),
+            make_mock_chunk("internal reasoning"),
+            make_mock_chunk("</think>Answer: "),
+            make_mock_chunk("42"),
         ]
         lines = _run_stream(chunks)
         content = _collect_content(lines)
-        assert "And the answer" in content
-        assert "thinking" not in content
+        assert "Answer: 42" in content
+        assert "internal reasoning" not in content
 
     def test_whitespace_before_tag(self):
         chunks = [
@@ -180,9 +181,7 @@ class TestStreamProcessor:
         chunk = make_mock_chunk("Hi")
         chunk.usage = usage_mock
 
-        ctx = StreamContext(
-            model_id="m", display_name="M", make_chunk=_make_chunk_fn, remove_tags=False
-        )
+        ctx = StreamContext(model_id="m", display_name="M", make_chunk=_make_chunk_fn, remove_tags=False)
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         list(process_stream(iter([chunk]), ctx, usage))
         assert usage["prompt_tokens"] == 15

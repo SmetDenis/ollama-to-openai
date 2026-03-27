@@ -1,7 +1,6 @@
 """Tests for ollama_adapter.models module."""
 
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,7 +16,6 @@ from ollama_adapter.models import (
     resolve_model_name,
     resolve_system_prompt,
 )
-
 
 # ---------------------------------------------------------------------------
 # resolve_model_name

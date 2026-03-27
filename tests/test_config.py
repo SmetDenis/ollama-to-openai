@@ -1,6 +1,5 @@
 """Tests for ollama_adapter.config module."""
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -8,7 +7,6 @@ import yaml
 
 from ollama_adapter import state
 from ollama_adapter.config import check_and_reload_config, init_state, load_config
-
 
 # ---------------------------------------------------------------------------
 # load_config: happy paths
@@ -271,7 +269,7 @@ class TestCheckAndReloadConfig:
 
         old_config = state.CONFIG.copy()
         check_and_reload_config()
-        assert state.CONFIG == old_config
+        assert old_config == state.CONFIG
 
     def test_mtime_changed(self, config_file, minimal_config):
         with patch("ollama_adapter.config.OpenAI") as mock_cls:
@@ -300,7 +298,7 @@ class TestCheckAndReloadConfig:
         config_file.write_text(yaml.dump({"server": {}}))
 
         check_and_reload_config()
-        assert state.CONFIG == old_config
+        assert old_config == state.CONFIG
 
     def test_file_disappeared(self, config_file):
         with patch("ollama_adapter.config.OpenAI"):
@@ -309,7 +307,7 @@ class TestCheckAndReloadConfig:
         state.config_file_path = "/nonexistent/path.yml"
         old_config = state.CONFIG.copy()
         check_and_reload_config()
-        assert state.CONFIG == old_config
+        assert old_config == state.CONFIG
 
     def test_openai_client_error_keeps_old(self, config_file, minimal_config):
         with patch("ollama_adapter.config.OpenAI") as mock_cls:
