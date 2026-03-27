@@ -48,6 +48,7 @@ ignore = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-v --tb=short --strict-markers"
+tmp_path_retention_policy = "none"
 
 [tool.ruff.lint.per-file-ignores]
 "__main__.py" = ["INP001"]
