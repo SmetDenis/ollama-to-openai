@@ -6,6 +6,7 @@ import re
 import os
 import uuid
 import logging
+import threading
 from functools import wraps
 from datetime import datetime
 from flask import Flask, request, jsonify, Response, stream_with_context, g
@@ -787,6 +788,7 @@ CACHED_MODELS = []
 # Config reload state
 _config_file_path = 'config.yml'
 _last_config_reload_time = None
+_config_reload_lock = threading.Lock()
 
 try:
     _last_config_mtime = os.path.getmtime(_config_file_path)
@@ -795,7 +797,8 @@ except OSError:
 
 
 def _check_and_reload_config():
-    """Check config.yml mtime; reload everything from scratch if changed."""
+    """Check config.yml mtime; reload everything from scratch if changed.
+    Thread-safe: uses _config_reload_lock to prevent concurrent reloads."""
     global CONFIG, CACHED_MODELS, client, _last_config_mtime, _last_config_reload_time
 
     try:
@@ -806,33 +809,41 @@ def _check_and_reload_config():
     if current_mtime == _last_config_mtime:
         return
 
-    _last_config_mtime = current_mtime
+    with _config_reload_lock:
+        # Re-check after acquiring lock (another thread may have reloaded already)
+        if current_mtime == _last_config_mtime:
+            return
 
-    try:
-        new_config = load_config(_config_file_path)
-    except Exception as e:
-        logger.warning(f"Config reload failed, keeping current config: {e}")
-        return
+        _last_config_mtime = current_mtime
 
-    CONFIG = new_config
+        try:
+            new_config = load_config(_config_file_path)
+        except Exception as e:
+            logger.warning(f"Config reload failed, keeping current config: {e}")
+            return
 
-    try:
-        client = OpenAI(
-            api_key=new_config['openai']['api_key'],
-            base_url=new_config['openai'].get('base_url', 'https://api.openai.com/v1')
-        )
-    except Exception as e:
-        logger.warning(f"Failed to recreate OpenAI client: {e}")
+        try:
+            new_client = OpenAI(
+                api_key=new_config['openai']['api_key'],
+                base_url=new_config['openai'].get('base_url', 'https://api.openai.com/v1')
+            )
+        except Exception as e:
+            logger.warning(f"Failed to recreate OpenAI client: {e}")
+            return
 
-    _configure_log_format(new_config)
+        # Atomic swap: update all globals together
+        CONFIG = new_config
+        client = new_client
 
-    try:
-        get_and_cache_models(force_refresh=True)
-    except Exception as e:
-        logger.warning(f"Failed to rebuild model cache: {e}")
+        _configure_log_format(new_config)
 
-    _last_config_reload_time = datetime.now().isoformat() + "Z"
-    logger.info("Config changed, reloaded")
+        try:
+            get_and_cache_models(force_refresh=True)
+        except Exception as e:
+            logger.warning(f"Failed to rebuild model cache: {e}")
+
+        _last_config_reload_time = datetime.now().isoformat() + "Z"
+        logger.info("Config changed, reloaded")
 
 
 @app.before_request
