@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   check:
-    name: Lint & Type Check
+    name: Lint, Type Check & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Lint & Type Check
+      - name: Lint, Type Check & Test
         run: make check
 
   docker:
