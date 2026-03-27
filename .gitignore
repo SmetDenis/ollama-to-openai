@@ -211,3 +211,4 @@ __marimo__/
 config.yml
 .claude
 prompts/*.md
+tmp/
