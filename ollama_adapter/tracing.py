@@ -2,7 +2,10 @@
 
 import contextlib
 import json
+import re
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from flask import g
 
@@ -30,11 +33,38 @@ def tracing_log_headers_enabled() -> bool:
     return bool(tracing.get("enabled", False)) and bool(tracing.get("log_headers", False))
 
 
+def _slugify(name: str) -> str:
+    """Convert a model name to a URL-friendly slug.
+
+    Example: "GPT-4o Mini" -> "gpt-4o-mini"
+    """
+    slug = name.lower()
+    slug = re.sub(r"[^a-z0-9-]", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug.strip("-")
+
+
+def _build_grouped_trace_id(display_name: str) -> str:
+    """Build a deterministic trace ID based on current hour and model slug.
+
+    Format: {prefix}_{YYYYMMDDHH}_{slug}
+    Example: oa_2026032814_gpt-4o-mini
+    """
+    tracing = state.CONFIG.get("tracing", {})
+    prefix = tracing.get("trace_id_prefix", "oa")
+    tz_name = tracing.get("timezone", "UTC")
+    now = datetime.now(tz=ZoneInfo(tz_name))
+    hour_stamp = now.strftime("%Y%m%d%H")
+    slug = _slugify(display_name)
+    return f"{prefix}_{hour_stamp}_{slug}"
+
+
 def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str | None = None) -> dict[str, str] | None:
     """Merge LiteLLM tracing headers into extra_headers.
 
     Model-specific headers take precedence over tracing headers.
     display_name is sent via x-litellm-spend-logs-metadata for cost tracking.
+    When trace_grouping is "hourly", generates a deterministic trace ID per hour+model.
     """
     tracing = state.CONFIG.get("tracing", {})
     if not tracing.get("enabled", False) or not tracing.get("send_trace_headers", False):
@@ -43,6 +73,11 @@ def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str 
     trace_headers: dict[str, str] = {}
     trace_id: str | None = getattr(g, "trace_id", None)
     request_id: str | None = getattr(g, "request_id", None)
+    trace_id_incoming: bool = getattr(g, "trace_id_incoming", False)
+
+    grouping = tracing.get("trace_grouping", "")
+    if grouping == "hourly" and display_name and not trace_id_incoming:
+        trace_id = _build_grouped_trace_id(display_name)
 
     if trace_id:
         trace_headers["x-litellm-trace-id"] = trace_id

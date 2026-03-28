@@ -44,6 +44,8 @@ logging:
 #                                      # Also sends adapter_model (custom_name) via spend-logs-metadata and body metadata
 #   trace_id_prefix: "oa"             # Prefix for auto-generated trace IDs (default: "oa")
 #   tags: "ollama-adapter,production"  # Comma-separated tags sent as x-litellm-tags header
+#   trace_grouping: "hourly"          # Group trace IDs by hour + model slug (default: none, unique per request)
+#   timezone: "UTC"                   # Timezone for hourly grouping (default: "UTC", e.g. "Europe/Moscow")
 
 # Model configurations (optional)
 # If empty, all OpenAI models will be available with default settings

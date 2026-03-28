@@ -32,9 +32,11 @@ def create_app(config_path: str = "config.yml") -> Flask:
         incoming_trace = request.headers.get("x-litellm-trace-id")
         if incoming_trace:
             g.trace_id = incoming_trace
+            g.trace_id_incoming = True
         else:
             prefix = tracing.get("trace_id_prefix", "oa")
             g.trace_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
+            g.trace_id_incoming = False
         g.litellm_response_headers = {}
 
     app.register_blueprint(bp)
