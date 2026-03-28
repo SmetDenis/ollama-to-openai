@@ -44,19 +44,29 @@ def _slugify(name: str) -> str:
     return slug.strip("-")
 
 
-def _build_grouped_trace_id(display_name: str) -> str:
-    """Build a deterministic trace ID based on current hour and model slug.
+def _build_grouped_trace_id() -> str:
+    """Build a deterministic trace ID based on current hour.
 
-    Format: {prefix}_{YYYYMMDDHH}_{slug}
-    Example: oa_2026032814_gpt-4o-mini
+    Format: {prefix}_{YYYYMMDDHH}
+    Example: oa_2026032814
     """
     tracing = state.CONFIG.get("tracing", {})
     prefix = tracing.get("trace_id_prefix", "oa")
     tz_name = tracing.get("timezone", "UTC")
     now = datetime.now(tz=ZoneInfo(tz_name))
     hour_stamp = now.strftime("%Y%m%d%H")
-    slug = _slugify(display_name)
-    return f"{prefix}_{hour_stamp}_{slug}"
+    return f"{prefix}_{hour_stamp}"
+
+
+def _build_tags(tracing: dict[str, Any], grouping: str, display_name: str | None) -> str:
+    """Combine static tags from config with the model slug when grouping is active."""
+    parts: list[str] = []
+    tags: str = tracing.get("tags", "")
+    if tags:
+        parts.append(tags)
+    if grouping == "hourly" and display_name:
+        parts.append(_slugify(display_name))
+    return ",".join(parts)
 
 
 def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str | None = None) -> dict[str, str] | None:
@@ -64,7 +74,7 @@ def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str 
 
     Model-specific headers take precedence over tracing headers.
     display_name is sent via x-litellm-spend-logs-metadata for cost tracking.
-    When trace_grouping is "hourly", generates a deterministic trace ID per hour+model.
+    When trace_grouping is "hourly", generates a deterministic trace ID per hour.
     """
     tracing = state.CONFIG.get("tracing", {})
     if not tracing.get("enabled", False) or not tracing.get("send_trace_headers", False):
@@ -76,17 +86,17 @@ def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str 
     trace_id_incoming: bool = getattr(g, "trace_id_incoming", False)
 
     grouping = tracing.get("trace_grouping", "")
-    if grouping == "hourly" and display_name and not trace_id_incoming:
-        trace_id = _build_grouped_trace_id(display_name)
+    if grouping == "hourly" and not trace_id_incoming:
+        trace_id = _build_grouped_trace_id()
 
     if trace_id:
         trace_headers["x-litellm-trace-id"] = trace_id
     if request_id:
         trace_headers["x-litellm-call-id"] = request_id
 
-    tags: str = tracing.get("tags", "")
-    if tags:
-        trace_headers["x-litellm-tags"] = tags
+    combined_tags = _build_tags(tracing, grouping, display_name)
+    if combined_tags:
+        trace_headers["x-litellm-tags"] = combined_tags
 
     if display_name:
         trace_headers["x-litellm-spend-logs-metadata"] = json.dumps({"adapter_model": display_name})
