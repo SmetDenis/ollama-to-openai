@@ -148,11 +148,8 @@ def log_endpoint(f: Callable[..., Any]) -> Callable[..., Any]:
         endpoint_path = request.path
 
         if request.is_json:
-            try:
-                data = request.get_json()
-                log_request(endpoint_path, request.method, data)
-            except (ValueError, RuntimeError):
-                log_request(endpoint_path, request.method)
+            data = request.get_json(silent=True)
+            log_request(endpoint_path, request.method, data)
         else:
             log_request(endpoint_path, request.method)
 
