@@ -153,9 +153,15 @@ def _validate_tracing(tracing_config: Any) -> None:
         if flag in tracing_config and not isinstance(tracing_config[flag], bool):
             msg = f"tracing.{flag} must be a boolean (true/false)"
             raise ValueError(msg)
-    for field in ("trace_id_prefix", "tags"):
+    for field in ("trace_id_prefix", "trace_name_prefix", "tags", "timezone"):
         if field in tracing_config and not isinstance(tracing_config[field], str):
             msg = f"tracing.{field} must be a string"
+            raise ValueError(msg)
+    if "trace_grouping" in tracing_config:
+        allowed = ("hourly", "daily")
+        val = tracing_config["trace_grouping"]
+        if not isinstance(val, str) or val not in allowed:
+            msg = f"tracing.trace_grouping must be one of {allowed}"
             raise ValueError(msg)
 
 

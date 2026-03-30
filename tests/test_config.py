@@ -207,6 +207,41 @@ class TestLoadConfigTracing:
         with pytest.raises(ValueError, match="must be a string"):
             load_config(str(path))
 
+    def test_tracing_grouping_valid_hourly(self, tmp_path, minimal_config):
+        minimal_config["tracing"] = {"trace_grouping": "hourly"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        config = load_config(str(path))
+        assert config["tracing"]["trace_grouping"] == "hourly"
+
+    def test_tracing_grouping_valid_daily(self, tmp_path, minimal_config):
+        minimal_config["tracing"] = {"trace_grouping": "daily"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        config = load_config(str(path))
+        assert config["tracing"]["trace_grouping"] == "daily"
+
+    def test_tracing_grouping_invalid(self, tmp_path, minimal_config):
+        minimal_config["tracing"] = {"trace_grouping": "weekly"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="trace_grouping"):
+            load_config(str(path))
+
+    def test_tracing_grouping_not_string(self, tmp_path, minimal_config):
+        minimal_config["tracing"] = {"trace_grouping": 42}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="trace_grouping"):
+            load_config(str(path))
+
+    def test_tracing_timezone_not_string(self, tmp_path, minimal_config):
+        minimal_config["tracing"] = {"timezone": 123}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="must be a string"):
+            load_config(str(path))
+
 
 # ---------------------------------------------------------------------------
 # load_config: file errors
