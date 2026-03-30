@@ -2,7 +2,7 @@
 
 import uuid
 
-from flask import Flask, g, request
+from flask import Flask, Response, g, jsonify, request
 
 from ollama_adapter import state
 from ollama_adapter.config import check_and_reload_config, init_state
@@ -40,5 +40,10 @@ def create_app(config_path: str = "config.yml") -> Flask:
         g.litellm_response_headers = {}
 
     app.register_blueprint(bp)
+
+    @app.errorhandler(Exception)
+    def _handle_unhandled_exception(e: Exception) -> tuple[Response, int]:  # noqa: ARG001
+        state.logger.exception("Unhandled exception")
+        return jsonify({"error": "Internal server error"}), 500
 
     return app

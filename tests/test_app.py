@@ -8,6 +8,27 @@ from ollama_adapter import state
 from ollama_adapter.app import create_app
 
 
+class TestGlobalErrorHandler:
+    def test_unhandled_exception_returns_json_500(self, config_file, mock_openai_client):
+        state.CONFIG = {"server": {"host": "0.0.0.0", "port": 11434}, "openai": {"api_key": "k"}}
+        state.client = mock_openai_client
+
+        with patch("ollama_adapter.app.init_state"):
+            app = create_app(str(config_file))
+
+        @app.route("/test-unhandled-error")
+        def _raise_error():
+            msg = "unexpected"
+            raise RuntimeError(msg)
+
+        with patch.object(state.logger, "exception") as mock_log, app.test_client() as client:
+            resp = client.get("/test-unhandled-error")
+
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == "Internal server error"
+        mock_log.assert_called_once_with("Unhandled exception")
+
+
 class TestCreateApp:
     def test_returns_flask_app(self, config_file):
         with patch("ollama_adapter.app.init_state"):

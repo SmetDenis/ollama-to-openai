@@ -162,7 +162,7 @@ def log_endpoint(f: Callable[..., Any]) -> Callable[..., Any]:
             result = f(*args, **kwargs)
         except Exception:
             duration = time.time() - start_time
-            state.logger.error("Endpoint %s failed after %.3fs", endpoint_path, duration)
+            state.logger.exception("Endpoint %s failed after %.3fs", endpoint_path, duration)
             log_response(endpoint_path, 500, error="unhandled exception")
             raise
 

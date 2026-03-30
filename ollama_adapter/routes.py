@@ -114,6 +114,7 @@ def _call_openai_streaming(
             yield json.dumps(final_response) + "\n"
 
         except Exception as e:  # noqa: BLE001
+            state.logger.exception("Streaming error (model=%s)", ctx.model_id)
             yield json.dumps({"error": f"Streaming error: {e!s}"}) + "\n"
         finally:
             if raw_ctx is not None:
@@ -322,6 +323,7 @@ def chat() -> Response | tuple[Response, int]:
         return _call_openai_non_streaming(ctx, "message")
 
     except Exception as e:  # noqa: BLE001
+        state.logger.exception("Chat endpoint error")
         return jsonify({"error": f"Internal server error: {e!s}"}), 500
 
 
@@ -375,6 +377,7 @@ def generate() -> Response | tuple[Response, int]:
         return _call_openai_non_streaming(ctx, "response")
 
     except Exception as e:  # noqa: BLE001
+        state.logger.exception("Generate endpoint error")
         return jsonify({"error": f"Internal server error: {e!s}"}), 500
 
 
@@ -449,6 +452,7 @@ def embed() -> Response | tuple[Response, int]:
         )
 
     except Exception as e:  # noqa: BLE001
+        state.logger.exception("Embed endpoint error")
         return jsonify({"error": f"Embedding error: {e!s}"}), 500
 
 

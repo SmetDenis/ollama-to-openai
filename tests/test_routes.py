@@ -167,14 +167,16 @@ class TestChatNonStreaming:
 
     def test_api_error_500(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
-        resp = client.post(
-            "/api/chat",
-            json={
-                "model": "gpt-4o",
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-        )
+        with patch.object(state.logger, "exception") as mock_log:
+            resp = client.post(
+                "/api/chat",
+                json={
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
         assert resp.status_code == 500
+        mock_log.assert_called_once_with("Chat endpoint error")
 
     def test_thinking_removal(self, client, mock_openai_client, full_config):
         full_config.pop("tracing", None)
@@ -245,6 +247,22 @@ class TestChatStreaming:
         assert last["done"] is True
         assert last["message"]["content"] == ""
 
+    def test_streaming_error_logged(self, client, mock_openai_client):
+        mock_openai_client.chat.completions.create.side_effect = RuntimeError("stream fail")
+        with patch.object(state.logger, "exception") as mock_log:
+            resp = client.post(
+                "/api/chat",
+                json={
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            )
+            data = collect_stream(resp)
+        assert any("error" in chunk for chunk in data)
+        mock_log.assert_called_once()
+        assert "Streaming error" in mock_log.call_args[0][0]
+
 
 # ---------------------------------------------------------------------------
 # POST /api/generate
@@ -290,6 +308,16 @@ class TestGenerate:
         assert last["done"] is True
         assert "response" in last
 
+    def test_api_error_500(self, client, mock_openai_client):
+        mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
+        with patch.object(state.logger, "exception") as mock_log:
+            resp = client.post(
+                "/api/generate",
+                json={"model": "gpt-4o", "prompt": "Write a poem"},
+            )
+        assert resp.status_code == 500
+        mock_log.assert_called_once_with("Generate endpoint error")
+
 
 # ---------------------------------------------------------------------------
 # POST /api/embed
@@ -321,8 +349,10 @@ class TestEmbed:
 
     def test_api_error_500(self, client, mock_openai_client):
         mock_openai_client.embeddings.create.side_effect = RuntimeError("fail")
-        resp = client.post("/api/embed", json={"model": "emb", "input": "hi"})
+        with patch.object(state.logger, "exception") as mock_log:
+            resp = client.post("/api/embed", json={"model": "emb", "input": "hi"})
         assert resp.status_code == 500
+        mock_log.assert_called_once_with("Embed endpoint error")
 
 
 # ---------------------------------------------------------------------------
