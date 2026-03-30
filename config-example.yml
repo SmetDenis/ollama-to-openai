@@ -45,7 +45,7 @@ logging:
 #   trace_id_prefix: "oa"             # Prefix for auto-generated trace IDs (default: "oa")
 #   tags: "ollama-adapter,production"  # Comma-separated tags sent as x-litellm-tags header
 #   trace_name_prefix: "myapp/"       # Prefix for trace_name in body metadata (default: none, e.g. "myapp/" -> "myapp/GPT-4o")
-#   trace_grouping: "hourly"          # Group trace IDs: "hourly" (YYYY_MM_DD_HH) or "daily" (YYYY_MM_DD) + model slug in tags (default: none)
+#   trace_grouping: "hourly"          # Group trace IDs: "hourly" or "daily", format: {prefix}-{model}-{date} (default: none)
 #   timezone: "UTC"                   # Timezone for hourly/daily grouping (default: "UTC", e.g. "Europe/Moscow")
 
 # Model configurations (optional)

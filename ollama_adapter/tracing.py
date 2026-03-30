@@ -44,18 +44,22 @@ def _slugify(name: str) -> str:
     return slug.strip("-")
 
 
-def _build_grouped_trace_id(grouping: str) -> str:
+def _build_grouped_trace_id(grouping: str, display_name: str | None = None) -> str:
     """Build a deterministic trace ID based on grouping interval.
 
-    Format: {prefix}_{YYYY}_{MM}_{DD}_{HH}  (hourly)
-            {prefix}_{YYYY}_{MM}_{DD}        (daily)
+    Format: {prefix}_{model-slug}_{YYYY}-{MM}-{DD}-{HH}  (hourly)
+            {prefix}_{model-slug}_{YYYY}-{MM}-{DD}        (daily)
     """
     tracing = state.CONFIG.get("tracing", {})
     prefix = tracing.get("trace_id_prefix", "oa")
     tz_name = tracing.get("timezone", "UTC")
     now = datetime.now(tz=ZoneInfo(tz_name))
-    fmt = "%Y_%m_%d_%H" if grouping == "hourly" else "%Y_%m_%d"
-    return f"{prefix}_{now.strftime(fmt)}"
+    fmt = "%Y-%m-%d-%H" if grouping == "hourly" else "%Y-%m-%d"
+    parts = [prefix]
+    if display_name:
+        parts.append(_slugify(display_name))
+    parts.append(now.strftime(fmt))
+    return "_".join(parts)
 
 
 def _build_tags(tracing: dict[str, Any], grouping: str, display_name: str | None) -> str:
@@ -87,7 +91,7 @@ def build_trace_headers(extra_headers: dict[str, str] | None, display_name: str 
 
     grouping = tracing.get("trace_grouping", "")
     if grouping in ("hourly", "daily") and not trace_id_incoming:
-        trace_id = _build_grouped_trace_id(grouping)
+        trace_id = _build_grouped_trace_id(grouping, display_name)
 
     if trace_id:
         trace_headers["x-litellm-trace-id"] = trace_id

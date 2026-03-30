@@ -47,24 +47,32 @@ class TestBuildGroupedTraceId:
         fixed = datetime(2026, 3, 28, 14, 30, tzinfo=ZoneInfo("UTC"))
         with patch("ollama_adapter.tracing.datetime") as mock_dt:
             mock_dt.now.return_value = fixed
-            result = _build_grouped_trace_id("hourly")
-        assert result == "oa_2026_03_28_14"
+            result = _build_grouped_trace_id("hourly", "GPT-4o")
+        assert result == "oa_gpt-4o_2026-03-28-14"
 
     def test_daily_format(self):
         state.CONFIG = {"tracing": {"trace_id_prefix": "oa", "timezone": "UTC"}}
         fixed = datetime(2026, 3, 28, 14, 30, tzinfo=ZoneInfo("UTC"))
         with patch("ollama_adapter.tracing.datetime") as mock_dt:
             mock_dt.now.return_value = fixed
+            result = _build_grouped_trace_id("daily", "GPT-4o")
+        assert result == "oa_gpt-4o_2026-03-28"
+
+    def test_without_display_name(self):
+        state.CONFIG = {"tracing": {"trace_id_prefix": "oa", "timezone": "UTC"}}
+        fixed = datetime(2026, 3, 28, 14, 30, tzinfo=ZoneInfo("UTC"))
+        with patch("ollama_adapter.tracing.datetime") as mock_dt:
+            mock_dt.now.return_value = fixed
             result = _build_grouped_trace_id("daily")
-        assert result == "oa_2026_03_28"
+        assert result == "oa_2026-03-28"
 
     def test_custom_prefix(self):
         state.CONFIG = {"tracing": {"trace_id_prefix": "myapp", "timezone": "UTC"}}
         fixed = datetime(2026, 1, 5, 9, 0, tzinfo=ZoneInfo("UTC"))
         with patch("ollama_adapter.tracing.datetime") as mock_dt:
             mock_dt.now.return_value = fixed
-            result = _build_grouped_trace_id("daily")
-        assert result == "myapp_2026_01_05"
+            result = _build_grouped_trace_id("daily", "GPT-4o Mini")
+        assert result == "myapp_gpt-4o-mini_2026-01-05"
 
     def test_timezone_applied(self):
         state.CONFIG = {"tracing": {"trace_id_prefix": "oa", "timezone": "Asia/Tokyo"}}
@@ -72,8 +80,8 @@ class TestBuildGroupedTraceId:
         fixed = datetime(2026, 3, 29, 8, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
         with patch("ollama_adapter.tracing.datetime") as mock_dt:
             mock_dt.now.return_value = fixed
-            result = _build_grouped_trace_id("daily")
-        assert result == "oa_2026_03_29"
+            result = _build_grouped_trace_id("daily", "GPT-4o")
+        assert result == "oa_gpt-4o_2026-03-29"
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +232,7 @@ class TestBuildTraceHeaders:
             with patch("ollama_adapter.tracing.datetime") as mock_dt:
                 mock_dt.now.return_value = fixed
                 result = build_trace_headers(None, display_name="GPT-4o")
-        assert result["x-litellm-trace-id"] == "oa_2026_03_28_14"
+        assert result["x-litellm-trace-id"] == "oa_gpt-4o_2026-03-28-14"
         assert "gpt-4o" in result["x-litellm-tags"]
 
     def test_daily_grouping(self, app):
@@ -245,7 +253,7 @@ class TestBuildTraceHeaders:
             with patch("ollama_adapter.tracing.datetime") as mock_dt:
                 mock_dt.now.return_value = fixed
                 result = build_trace_headers(None, display_name="GPT-4o")
-        assert result["x-litellm-trace-id"] == "oa_2026_03_28"
+        assert result["x-litellm-trace-id"] == "oa_gpt-4o_2026-03-28"
         assert "gpt-4o" in result["x-litellm-tags"]
 
     def test_grouping_skipped_when_incoming_trace(self, app):
