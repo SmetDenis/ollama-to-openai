@@ -15,7 +15,7 @@ dev = [
     "ruff>=0.15.8",
     "mypy>=1.15",
     "types-PyYAML>=6.0",
-    "pytest>=8.3",
+    "pytest>=9.0.3",
     "pytest-cov>=6.0",
 ]
 
