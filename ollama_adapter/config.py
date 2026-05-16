@@ -104,7 +104,16 @@ def _validate_single_ip_route(
             msg = f"Model '{model_display}': ip_routing[{rule_idx}] '{dict_key}' must be a dict"
             raise TypeError(msg)
 
-    recognized_keys = {"ip", "name", "system_prompt", "remove_thinking_tags", "prompt_caching", "params", "headers"}
+    recognized_keys = {
+        "ip",
+        "name",
+        "system_prompt_inline",
+        "system_prompt_file",
+        "remove_thinking_tags",
+        "prompt_caching",
+        "params",
+        "headers",
+    }
     unknown_keys = set(rule.keys()) - recognized_keys
     if unknown_keys:
         state.logger.warning(
@@ -122,6 +131,47 @@ def _resolve_ips_for_validation(ip_value: str, clients_config: dict[str, Any] | 
         resolved = clients_config[ip_value]
         return [resolved] if isinstance(resolved, str) else list(resolved)
     return [ip_value]
+
+
+def _check_system_prompt_keys(entry: dict[str, Any], model_display: str, location: str) -> None:
+    """Warn about deprecated `system_prompt` key and inline/file conflict.
+
+    Drops the deprecated key from `entry` so it does not propagate further.
+    """
+    if "system_prompt" in entry:
+        state.logger.warning(
+            "Model '%s'%s: key 'system_prompt' is deprecated and ignored. "
+            "Use 'system_prompt_inline' for an inline string or 'system_prompt_file' for a file path.",
+            model_display,
+            location,
+        )
+        del entry["system_prompt"]
+
+    inline = entry.get("system_prompt_inline")
+    file_path = entry.get("system_prompt_file")
+    if isinstance(inline, str) and inline.strip() and isinstance(file_path, str) and file_path.strip():
+        state.logger.warning(
+            "Model '%s'%s: both 'system_prompt_inline' and 'system_prompt_file' are set; "
+            "'system_prompt_file' will take precedence at request time.",
+            model_display,
+            location,
+        )
+
+
+def _validate_model_entries(models_config: list[Any]) -> None:
+    """Run per-model checks for system prompt fields at root and ip_routing levels."""
+    for idx, model in enumerate(models_config):
+        if not isinstance(model, dict):
+            continue
+        model_display = model.get("custom_name") or model.get("name", f"models[{idx}]")
+        _check_system_prompt_keys(model, model_display, "")
+
+        ip_routing = model.get("ip_routing")
+        if not isinstance(ip_routing, list):
+            continue
+        for rule_idx, rule in enumerate(ip_routing):
+            if isinstance(rule, dict):
+                _check_system_prompt_keys(rule, model_display, f" ip_routing[{rule_idx}]")
 
 
 def _validate_ip_routing(models_config: list[Any], clients_config: dict[str, Any] | None) -> None:
@@ -185,6 +235,7 @@ def load_config(path: str = "config.yml") -> dict[str, Any]:
         _validate_clients(clients_config)
 
     if models_config:
+        _validate_model_entries(models_config)
         _validate_ip_routing(models_config, clients_config)
 
     tracing_config = config.get("tracing")

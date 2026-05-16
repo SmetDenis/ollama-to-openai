@@ -6,6 +6,7 @@ import pytest
 
 from ollama_adapter import state
 from ollama_adapter.models import (
+    _read_prompt_file,
     apply_ip_routing,
     apply_prompt_caching,
     apply_system_prompt,
@@ -14,7 +15,6 @@ from ollama_adapter.models import (
     get_display_name,
     get_model_config,
     resolve_model_name,
-    resolve_system_prompt,
 )
 
 # ---------------------------------------------------------------------------
@@ -60,43 +60,43 @@ class TestGetDisplayName:
 
 
 # ---------------------------------------------------------------------------
-# resolve_system_prompt
+# _read_prompt_file
 # ---------------------------------------------------------------------------
 
 
-class TestResolveSystemPrompt:
-    def test_inline_string(self):
-        assert resolve_system_prompt("You are helpful") == "You are helpful"
-
-    def test_md_file(self, tmp_path, monkeypatch):
+class TestReadPromptFile:
+    def test_md_extension(self, tmp_path, monkeypatch):
         prompt_file = tmp_path / "prompt.md"
         prompt_file.write_text("Be concise.")
         monkeypatch.chdir(tmp_path)
-        assert resolve_system_prompt("prompt.md") == "Be concise."
+        assert _read_prompt_file("prompt.md") == "Be concise."
 
-    def test_md_file_absolute(self, tmp_path):
-        prompt_file = tmp_path / "test.md"
+    def test_txt_extension(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("From txt file.")
+        monkeypatch.chdir(tmp_path)
+        assert _read_prompt_file("prompt.txt") == "From txt file."
+
+    def test_no_extension(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "PROMPT"
+        prompt_file.write_text("No extension here.")
+        monkeypatch.chdir(tmp_path)
+        assert _read_prompt_file("PROMPT") == "No extension here."
+
+    def test_absolute_path(self, tmp_path):
+        prompt_file = tmp_path / "test.yml"
         prompt_file.write_text("Hello prompt")
-        assert resolve_system_prompt(str(prompt_file)) == "Hello prompt"
+        assert _read_prompt_file(str(prompt_file)) == "Hello prompt"
 
-    def test_md_file_empty(self, tmp_path, monkeypatch):
-        prompt_file = tmp_path / "empty.md"
+    def test_empty_file(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "empty.txt"
         prompt_file.write_text("   ")
         monkeypatch.chdir(tmp_path)
-        assert resolve_system_prompt("empty.md") is None
+        assert _read_prompt_file("empty.txt") is None
 
-    def test_md_file_not_found(self):
+    def test_file_not_found(self):
         with pytest.raises(FileNotFoundError):
-            resolve_system_prompt("nonexistent.md")
-
-    def test_none(self):
-        assert resolve_system_prompt(None) is None
-
-    def test_empty_string(self):
-        assert resolve_system_prompt("") is None
-
-    def test_whitespace_only(self):
-        assert resolve_system_prompt("   ") is None
+            _read_prompt_file("nonexistent.txt")
 
 
 # ---------------------------------------------------------------------------
@@ -105,32 +105,64 @@ class TestResolveSystemPrompt:
 
 
 class TestApplySystemPrompt:
-    def test_replaces_existing(self):
+    def test_inline_replaces_existing(self):
         messages = [{"role": "system", "content": "old"}, {"role": "user", "content": "hi"}]
-        result = apply_system_prompt(messages, {"system_prompt": "new"}, "m")
+        result = apply_system_prompt(messages, {"system_prompt_inline": "new"}, "m")
         assert result[0]["content"] == "new"
 
-    def test_prepends_when_no_system(self):
+    def test_inline_prepends_when_no_system(self):
         messages = [{"role": "user", "content": "hi"}]
-        result = apply_system_prompt(messages, {"system_prompt": "injected"}, "m")
+        result = apply_system_prompt(messages, {"system_prompt_inline": "injected"}, "m")
         assert result[0]["role"] == "system"
         assert result[0]["content"] == "injected"
         assert result[1]["role"] == "user"
+
+    def test_file_any_extension(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("From file.")
+        monkeypatch.chdir(tmp_path)
+        messages = [{"role": "user", "content": "hi"}]
+        result = apply_system_prompt(messages, {"system_prompt_file": "prompt.txt"}, "m")
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "From file."
+
+    def test_both_fields_prefer_file(self, tmp_path, monkeypatch, caplog):
+        prompt_file = tmp_path / "p.txt"
+        prompt_file.write_text("file wins")
+        monkeypatch.chdir(tmp_path)
+        messages = [{"role": "user", "content": "hi"}]
+        with caplog.at_level("WARNING", logger="ollama_adapter"):
+            result = apply_system_prompt(
+                messages,
+                {"system_prompt_inline": "inline loses", "system_prompt_file": "p.txt"},
+                "m",
+            )
+        assert result[0]["content"] == "file wins"
+        assert any("both 'system_prompt_inline' and 'system_prompt_file'" in r.message for r in caplog.records)
 
     def test_no_prompt_in_config(self):
         messages = [{"role": "user", "content": "hi"}]
         result = apply_system_prompt(messages, {}, "m")
         assert result == messages
 
+    def test_empty_values_skip(self):
+        messages = [{"role": "user", "content": "hi"}]
+        result = apply_system_prompt(
+            messages,
+            {"system_prompt_inline": "   ", "system_prompt_file": ""},
+            "m",
+        )
+        assert result == messages
+
     def test_file_not_found_graceful(self):
         messages = [{"role": "user", "content": "hi"}]
-        result = apply_system_prompt(messages, {"system_prompt": "missing.md"}, "m")
+        result = apply_system_prompt(messages, {"system_prompt_file": "missing.txt"}, "m")
         assert result == messages
 
     def test_does_not_mutate_original(self):
         messages = [{"role": "user", "content": "hi"}]
         original = list(messages)
-        apply_system_prompt(messages, {"system_prompt": "new"}, "m")
+        apply_system_prompt(messages, {"system_prompt_inline": "new"}, "m")
         assert messages == original
 
 
@@ -237,7 +269,7 @@ class TestApplyIpRouting:
             "headers": {"X-Custom": "orig"},
             "ip_routing": [
                 {"ip": "10.0.0.1", "name": "openai/gpt-4o", "params": {"temperature": 0.3}},
-                {"ip": "10.0.0.2", "system_prompt": "Be concise."},
+                {"ip": "10.0.0.2", "system_prompt_inline": "Be concise."},
             ],
         }
 
@@ -286,7 +318,7 @@ class TestApplyIpRouting:
         state.CONFIG = {}
         entry = self._entry_with_routing()
         result = apply_ip_routing(entry, "10.0.0.2")
-        assert result["system_prompt"] == "Be concise."
+        assert result["system_prompt_inline"] == "Be concise."
 
     def test_client_alias_resolution(self, full_config):
         state.CONFIG = full_config
@@ -349,7 +381,7 @@ class TestGetModelConfig:
     def test_system_prompt_in_adapter_params(self, full_config):
         state.CONFIG = full_config
         _, adapter_params, _ = get_model_config("openai/gpt-3.5-turbo")
-        assert adapter_params["system_prompt"] == "You are helpful."
+        assert adapter_params["system_prompt_inline"] == "You are helpful."
 
 
 # ---------------------------------------------------------------------------

@@ -44,8 +44,9 @@ ollama_adapter/
 - **`get_display_name(original_name)`** (`models.py`) — reverse mapping for client responses
 - **`apply_ip_routing(model_entry, client_ip)`** (`models.py`) — applies IP-specific overrides; shallow merge for dict fields
 - **`get_and_cache_models()`** (`models.py`) — fetches models from the OpenAI API, caches in `state.CACHED_MODELS`
-- **`apply_system_prompt(messages, adapter_params, model_id)`** (`models.py`) — injects the system prompt from config
-- **`resolve_system_prompt(value)`** (`models.py`) — if the value ends with `.md`, reads the file on every request (hot-reload)
+- **`apply_system_prompt(messages, adapter_params, model_id)`** (`models.py`) — injects the system prompt from config; replaces an existing system message or prepends a new one
+- **`_resolve_system_prompt(adapter_params, model_id)`** (`models.py`) — picks between `system_prompt_inline` and `system_prompt_file`; if both are set, the file wins and a warning is logged
+- **`_read_prompt_file(path)`** (`models.py`) — reads prompt content from a file at the given path on every request (hot-reload, any extension supported)
 - **`apply_prompt_caching(messages, adapter_params, model_id)`** (`models.py`) — adds `cache_control` markers for Anthropic/Gemini
 - **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — strips `<think>`/`<thinking>` tags
 - **`_process_stream()`** (`thinking.py`) — 5-state machine for streaming tag removal
@@ -53,7 +54,7 @@ ollama_adapter/
 
 ### Prompts Directory
 
-`prompts/` — system prompt files (`.md`) referenced by `system_prompt` in the model config. Mounted read-only in Docker. Files are re-read on every request — editable without restart.
+`prompts/` — system prompt files (any extension) referenced by `system_prompt_file` in the model config. Mounted read-only in Docker. Files are re-read on every request — editable without restart.
 
 ## Commands
 
@@ -84,7 +85,7 @@ uv sync
 - **`logging`**: `log_level`, `log_requests`
 - **`tracing`**: LiteLLM proxy integration — request_id/trace_id, headers, tags
 - **`models`**: model list with a two-level structure:
-  - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt`
+  - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt_inline`, `system_prompt_file` (mutually exclusive; file wins on conflict; legacy `system_prompt` deprecated)
   - `params`: dict of OpenAI API parameters — passed through without validation
   - `headers`: dict of custom HTTP headers
   - `ip_routing`: list of IP-specific overrides (inheritance + shallow merge)

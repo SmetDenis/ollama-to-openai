@@ -18,44 +18,63 @@ _MODEL_DETAILS: dict[str, Any] = {
 }
 
 
-def resolve_system_prompt(value: str | None) -> str | None:
-    """Resolve system_prompt value to actual prompt text.
+def _read_prompt_file(path: str) -> str | None:
+    """Read prompt content from a file at the given path (any extension).
 
-    If value ends with '.md', read content from file (relative to CWD).
-    Otherwise return the string as-is.
+    Path is absolute or relative to CWD. Returns stripped content or None if empty.
+    Raises FileNotFoundError / OSError on read failure.
     """
-    if not value or not isinstance(value, str):
+    file_path = Path(path) if Path(path).is_absolute() else Path.cwd() / path
+    content = file_path.read_text(encoding="utf-8").strip()
+    return content or None
+
+
+def _normalize_prompt_value(value: Any) -> str | None:
+    """Return stripped non-empty string, or None for missing/blank/non-string values."""
+    if not isinstance(value, str):
         return None
+    stripped = value.strip()
+    return stripped or None
 
-    value = value.strip()
-    if not value:
-        return None
 
-    if value.endswith(".md"):
-        file_path = Path(value) if Path(value).is_absolute() else Path.cwd() / value
-        content = file_path.read_text(encoding="utf-8").strip()
-        return content or None
+def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str | None:
+    """Pick between system_prompt_inline and system_prompt_file and return prompt text.
 
-    return value
+    If both are set, prefer the file and emit a warning.
+    Raises FileNotFoundError / OSError when reading the file fails.
+    """
+    inline = _normalize_prompt_value(adapter_params.get("system_prompt_inline"))
+    file_path = _normalize_prompt_value(adapter_params.get("system_prompt_file"))
+
+    if file_path and inline:
+        state.logger.warning(
+            "Model '%s': both 'system_prompt_inline' and 'system_prompt_file' are set; "
+            "using 'system_prompt_file' ('%s') and ignoring inline value",
+            model_id,
+            file_path,
+        )
+    if file_path:
+        return _read_prompt_file(file_path)
+    return inline
 
 
 def apply_system_prompt(
     messages: list[dict[str, Any]], adapter_params: dict[str, Any], model_id: str
 ) -> list[dict[str, Any]]:
-    """Apply system prompt from model config to messages list.
+    """Apply resolved system prompt from model config to messages list.
 
-    If config has system_prompt and request has system message, replace it.
-    If config has system_prompt but no system message, prepend it.
-    If config has no system_prompt, return messages unchanged.
+    If a prompt is resolved and a system message exists, replace it.
+    If a prompt is resolved but no system message, prepend it.
+    Otherwise return messages unchanged.
     """
-    system_prompt_value = adapter_params.get("system_prompt")
-    if not system_prompt_value:
-        return messages
-
     try:
-        resolved = resolve_system_prompt(system_prompt_value)
+        resolved = _resolve_system_prompt(adapter_params, model_id)
     except FileNotFoundError:
-        state.logger.error("System prompt file not found for model '%s': %s", model_id, system_prompt_value)
+        state.logger.error(
+            "System prompt file not found for model '%s': %s",
+            model_id,
+            adapter_params.get("system_prompt_file"),
+        )
         return messages
     except OSError as e:
         state.logger.error("Failed to read system prompt for model '%s': %s", model_id, e)
@@ -238,7 +257,7 @@ def apply_ip_routing(model_entry: dict[str, Any], client_ip: str) -> dict[str, A
     merged = dict(model_entry)
     merged.pop("ip_routing", None)
 
-    for key in ("name", "system_prompt", "remove_thinking_tags", "prompt_caching"):
+    for key in ("name", "system_prompt_inline", "system_prompt_file", "remove_thinking_tags", "prompt_caching"):
         if key in matching_rule:
             merged[key] = matching_rule[key]
 
@@ -279,7 +298,7 @@ def get_model_config(
         model_entry = apply_ip_routing(model_entry, client_ip)
 
     adapter_params: dict[str, Any] = {}
-    for adapter_key in ("remove_thinking_tags", "system_prompt", "prompt_caching"):
+    for adapter_key in ("remove_thinking_tags", "system_prompt_inline", "system_prompt_file", "prompt_caching"):
         if adapter_key in model_entry:
             adapter_params[adapter_key] = model_entry[adapter_key]
 

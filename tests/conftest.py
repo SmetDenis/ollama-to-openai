@@ -61,10 +61,10 @@ def full_config(minimal_config) -> dict[str, Any]:
             {"name": "openai/gpt-4o-mini", "custom_name": "Mini", "remove_thinking_tags": True},
             {
                 "name": "openai/gpt-3.5-turbo",
-                "system_prompt": "You are helpful.",
+                "system_prompt_inline": "You are helpful.",
                 "ip_routing": [
                     {"ip": "office", "name": "openai/gpt-4o", "params": {"temperature": 0.3}},
-                    {"ip": "10.0.0.5", "system_prompt": "Be concise."},
+                    {"ip": "10.0.0.5", "system_prompt_inline": "Be concise."},
                 ],
             },
         ],

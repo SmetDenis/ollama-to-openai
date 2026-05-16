@@ -56,7 +56,7 @@ models:
   - name: openai/gpt-4o
     custom_name: "GPT-4o"
     remove_thinking_tags: true
-    system_prompt: "prompts/assistant.md"
+    system_prompt_file: "prompts/assistant.md"
     params:
       temperature: 0.7
       max_tokens: 2000
@@ -107,18 +107,20 @@ Fields not specified in `ip_routing` entries inherit from the parent model. Dict
 
 ### System Prompts
 
-System prompts can be inline strings or paths to `.md` files:
+A model can declare a system prompt either inline or from a file. The two are mutually exclusive:
 
 ```yaml
 models:
   - name: openai/gpt-4o
-    system_prompt: "You are a helpful assistant."
+    system_prompt_inline: "You are a helpful assistant."
 
   - name: openai/gpt-4o-mini
-    system_prompt: "prompts/assistant.md"  # Re-read on each request
+    system_prompt_file: "prompts/assistant.md"   # any extension works (.txt, .yml, no extension, ...)
 ```
 
-Files in `prompts/` are re-read on every request — no restart needed to update prompts.
+- `system_prompt_file` paths may be absolute or relative to the working directory and are re-read on every request, so file edits take effect without a restart.
+- If both fields are set, the file wins and a warning is logged.
+- The legacy `system_prompt` field is no longer recognized — it is ignored and a deprecation warning is logged. Migrate to `system_prompt_inline` or `system_prompt_file`.
 
 ### Tracing (LiteLLM Integration)
 
