@@ -9,7 +9,8 @@ A Python service that translates Ollama API requests to OpenAI API calls, enabli
 - Model name mapping (`custom_name`) with bidirectional resolution
 - Per-model configuration: parameters, headers, system prompts
 - IP-based routing — different clients get different models/settings
-- System prompt injection from config (inline or `.md` files, hot-reloaded per request)
+- System prompt injection from config (inline or template files, hot-reloaded per request)
+- Jinja2 prompt templating: `{% include "..." %}` between files and `{{ var }}` substitution
 - Prompt caching support (Anthropic/Gemini via LiteLLM)
 - `<think>`/`<thinking>` tag removal (streaming and non-streaming)
 - Config hot-reload — changes to `config.yml` apply without restart
@@ -56,7 +57,7 @@ models:
   - name: openai/gpt-4o
     custom_name: "GPT-4o"
     remove_thinking_tags: true
-    system_prompt_file: "prompts/assistant.md"
+    system_prompt_file: "assistant.md"   # relative to prompts.base_dir
     params:
       temperature: 0.7
       max_tokens: 2000
@@ -107,7 +108,7 @@ Fields not specified in `ip_routing` entries inherit from the parent model. Dict
 
 ### System Prompts
 
-A model can declare a system prompt either inline or from a file. The two are mutually exclusive:
+A model can declare a system prompt either inline or from a file. The two are mutually exclusive — if both are set, the file wins and a warning is logged.
 
 ```yaml
 models:
@@ -115,12 +116,50 @@ models:
     system_prompt_inline: "You are a helpful assistant."
 
   - name: openai/gpt-4o-mini
-    system_prompt_file: "prompts/assistant.md"   # any extension works (.txt, .yml, no extension, ...)
+    system_prompt_file: "assistant.md"   # any extension; resolved under prompts.base_dir
 ```
 
-- `system_prompt_file` paths may be absolute or relative to the working directory and are re-read on every request, so file edits take effect without a restart.
-- If both fields are set, the file wins and a warning is logged.
+- `system_prompt_file` paths are **relative to `prompts.base_dir`** (default `./prompts`). Absolute paths and `..` are rejected to prevent reading files outside the prompts tree.
+- Templates are re-rendered on every request — file edits and config changes take effect without a restart.
 - The legacy `system_prompt` field is no longer recognized — it is ignored and a deprecation warning is logged. Migrate to `system_prompt_inline` or `system_prompt_file`.
+
+### Prompt Templates
+
+Prompts are Jinja2 templates rendered inside a `SandboxedEnvironment`. You get `{% include %}`, `{% if %}`, `{% for %}`, filters, macros, and variable substitution.
+
+```yaml
+prompts:
+  base_dir: "./prompts"
+  vars:
+    company_name: "Acme Corp"
+    default_role: "junior"
+
+models:
+  - name: openai/gpt-4o
+    system_prompt_file: "role/main.md"
+    prompt_vars:
+      role: "senior"            # overrides default_role for this model
+```
+
+Inside `prompts/role/main.md`:
+
+```jinja
+You work for {{ company_name }} as a {{ role }} engineer.
+
+{% include "snippets/safety.md" %}
+{% include "snippets/style-guide.md" %}
+```
+
+**Variable priority (low → high):** `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow (top-level keys).
+
+**Errors are surfaced to the client.** Missing files, undefined variables, syntax errors, sandbox violations, and include cycles all return HTTP 200 with an `assistant` message starting with `[PROMPT ERROR] ...` — the request is not forwarded to OpenAI.
+
+**Security notes:**
+- `FileSystemLoader` blocks `..` and absolute paths; templates cannot escape `prompts.base_dir`.
+- `SandboxedEnvironment` blocks access to unsafe attributes (e.g. `__class__`, `__mro__`).
+- Symlinks inside `prompts/` are followed — keep that in mind when constructing the directory.
+
+**Breaking change from earlier versions:** `system_prompt_file` paths were resolved against CWD; they are now resolved against `prompts.base_dir`. Rewrite `system_prompt_file: prompts/main.md` as `system_prompt_file: main.md` (and put the file inside `prompts/`).
 
 ### Tracing (LiteLLM Integration)
 
@@ -220,11 +259,12 @@ curl -X POST http://localhost:11434/api/embed \
 ollama_adapter/
   __init__.py          # Package init
   __main__.py          # Entrypoint (python -m ollama_adapter)
-  state.py             # Global state: CONFIG, client, CACHED_MODELS
+  state.py             # Global state: CONFIG, client, CACHED_MODELS, jinja_env
   config.py            # Config loading, validation, hot-reload
   logging_utils.py     # Request validation, logging, @log_endpoint decorator
   tracing.py           # LiteLLM tracing integration
   thinking.py          # <think>/<thinking> tag removal (regex + streaming state machine)
+  prompt_renderer.py   # Jinja2 sandboxed environment + PromptRenderError
   models.py            # Model resolution, caching, IP routing, system prompts
   routes.py            # Flask Blueprint with all API endpoints
   app.py               # Flask app factory

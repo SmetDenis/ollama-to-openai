@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from jinja2.sandbox import SandboxedEnvironment
 from openai import OpenAI
 
 from ollama_adapter import state
 from ollama_adapter.logging_utils import TraceContextFilter
+from ollama_adapter.prompt_renderer import init_jinja_env
+
+_DEFAULT_PROMPTS_BASE_DIR = "./prompts"
 
 
 def _validate_required_fields(config: dict[str, Any]) -> None:
@@ -99,7 +103,7 @@ def _validate_single_ip_route(
             raise ValueError(msg)
         seen_ips.add(ip)
 
-    for dict_key in ("params", "headers"):
+    for dict_key in ("params", "headers", "prompt_vars"):
         if dict_key in rule and rule[dict_key] is not None and not isinstance(rule[dict_key], dict):
             msg = f"Model '{model_display}': ip_routing[{rule_idx}] '{dict_key}' must be a dict"
             raise TypeError(msg)
@@ -113,6 +117,7 @@ def _validate_single_ip_route(
         "prompt_caching",
         "params",
         "headers",
+        "prompt_vars",
     }
     unknown_keys = set(rule.keys()) - recognized_keys
     if unknown_keys:
@@ -194,6 +199,52 @@ def _validate_ip_routing(models_config: list[Any], clients_config: dict[str, Any
             _validate_single_ip_route(rule, rule_idx, model_display, clients_config, seen_ips)
 
 
+def _validate_prompts_section(prompts_config: Any) -> None:
+    """Validate the top-level `prompts` section."""
+    if not isinstance(prompts_config, dict):
+        msg = "'prompts' must be a dict"
+        raise TypeError(msg)
+
+    base_dir = prompts_config.get("base_dir")
+    if base_dir is not None and (not isinstance(base_dir, str) or not base_dir.strip()):
+        msg = "'prompts.base_dir' must be a non-empty string"
+        raise ValueError(msg)
+
+    vars_config = prompts_config.get("vars")
+    if vars_config is None:
+        return
+    if not isinstance(vars_config, dict):
+        state.logger.warning("'prompts.vars' must be a dict; ignoring (treating as empty)")
+        prompts_config["vars"] = {}
+
+
+def _validate_model_prompt_vars(models_config: list[Any]) -> None:
+    """Warn-and-drop non-dict `prompt_vars` at model and ip_routing levels."""
+    for idx, model in enumerate(models_config):
+        if not isinstance(model, dict):
+            continue
+        model_display = model.get("custom_name") or model.get("name", f"models[{idx}]")
+        if "prompt_vars" in model and not isinstance(model["prompt_vars"], dict):
+            state.logger.warning(
+                "Model '%s': 'prompt_vars' must be a dict; ignoring (treating as empty)", model_display
+            )
+            model["prompt_vars"] = {}
+
+        ip_routing = model.get("ip_routing")
+        if not isinstance(ip_routing, list):
+            continue
+        for rule_idx, rule in enumerate(ip_routing):
+            if not isinstance(rule, dict):
+                continue
+            if "prompt_vars" in rule and not isinstance(rule["prompt_vars"], dict):
+                state.logger.warning(
+                    "Model '%s': ip_routing[%d] 'prompt_vars' must be a dict; ignoring",
+                    model_display,
+                    rule_idx,
+                )
+                rule["prompt_vars"] = {}
+
+
 def _validate_tracing(tracing_config: Any) -> None:
     """Validate the tracing configuration section."""
     if not isinstance(tracing_config, dict):
@@ -237,12 +288,30 @@ def load_config(path: str = "config.yml") -> dict[str, Any]:
     if models_config:
         _validate_model_entries(models_config)
         _validate_ip_routing(models_config, clients_config)
+        _validate_model_prompt_vars(models_config)
 
     tracing_config = config.get("tracing")
     if tracing_config is not None:
         _validate_tracing(tracing_config)
 
+    prompts_config = config.get("prompts")
+    if prompts_config is not None:
+        _validate_prompts_section(prompts_config)
+
     return config
+
+
+def _build_jinja_env_from_config(config: dict[str, Any]) -> SandboxedEnvironment:
+    """Construct a fresh Jinja2 sandboxed environment from `prompts.base_dir`."""
+    prompts_section = config.get("prompts") or {}
+    base_dir_str = prompts_section.get("base_dir") or _DEFAULT_PROMPTS_BASE_DIR
+    base_dir = Path(base_dir_str)
+    if not base_dir.exists():
+        state.logger.warning(
+            "prompts.base_dir '%s' does not exist; template includes will fail until it's created",
+            base_dir,
+        )
+    return init_jinja_env(base_dir)
 
 
 def _configure_log_format(config: dict[str, Any]) -> None:
@@ -295,6 +364,8 @@ def init_state(config_path: str = "config.yml") -> None:
         state.logger.error("Error initializing OpenAI client: %s", e)
         sys.exit(1)
 
+    state.jinja_env = _build_jinja_env_from_config(state.CONFIG)
+
     try:
         state.last_config_mtime = Path(config_path).stat().st_mtime
     except OSError:
@@ -339,6 +410,7 @@ def check_and_reload_config() -> None:
 
         state.CONFIG = new_config
         state.client = new_client
+        state.jinja_env = _build_jinja_env_from_config(new_config)
 
         _configure_log_format(new_config)
 

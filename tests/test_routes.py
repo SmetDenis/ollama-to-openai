@@ -265,6 +265,54 @@ class TestChatStreaming:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/chat — prompt render errors
+# ---------------------------------------------------------------------------
+
+
+class TestChatPromptRenderError:
+    def _config_with_missing_prompt(self):
+        return {
+            "models": [
+                {
+                    "name": "openai/gpt-4o",
+                    "custom_name": "GPT-4o",
+                    "system_prompt_file": "missing.md",
+                },
+            ],
+        }
+
+    def test_non_streaming_returns_assistant_message(self, client, mock_openai_client):
+        state.CONFIG = self._config_with_missing_prompt()
+        resp = client.post(
+            "/api/chat",
+            json={"model": "GPT-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["done"] is True
+        assert data["message"]["role"] == "assistant"
+        assert data["message"]["content"].startswith("[PROMPT ERROR]")
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_streaming_emits_error_chunk_then_done(self, client, mock_openai_client):
+        state.CONFIG = self._config_with_missing_prompt()
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "GPT-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+        assert resp.status_code == 200
+        chunks = collect_stream(resp)
+        assert len(chunks) >= 2
+        assert chunks[0]["message"]["content"].startswith("[PROMPT ERROR]")
+        assert chunks[-1]["done"] is True
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # POST /api/generate
 # ---------------------------------------------------------------------------
 
@@ -317,6 +365,45 @@ class TestGenerate:
             )
         assert resp.status_code == 500
         mock_log.assert_called_once_with("Generate endpoint error")
+
+    def test_prompt_render_error_non_streaming(self, client, mock_openai_client):
+        state.CONFIG = {
+            "models": [
+                {
+                    "name": "openai/gpt-4o",
+                    "custom_name": "GPT-4o",
+                    "system_prompt_file": "missing.md",
+                },
+            ],
+        }
+        resp = client.post(
+            "/api/generate",
+            json={"model": "GPT-4o", "prompt": "Write a poem"},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["done"] is True
+        assert data["response"].startswith("[PROMPT ERROR]")
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_prompt_render_error_streaming(self, client, mock_openai_client):
+        state.CONFIG = {
+            "models": [
+                {
+                    "name": "openai/gpt-4o",
+                    "custom_name": "GPT-4o",
+                    "system_prompt_file": "missing.md",
+                },
+            ],
+        }
+        resp = client.post(
+            "/api/generate",
+            json={"model": "GPT-4o", "prompt": "Write something", "stream": True},
+        )
+        chunks = collect_stream(resp)
+        assert chunks[0]["response"].startswith("[PROMPT ERROR]")
+        assert chunks[-1]["done"] is True
+        mock_openai_client.chat.completions.create.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

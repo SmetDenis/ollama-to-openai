@@ -1,10 +1,10 @@
 """Model configuration, resolution, caching, and prompt handling."""
 
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from ollama_adapter import state
+from ollama_adapter.prompt_renderer import render_file, render_inline
 
 _EVAL_DURATION_RATIO = 0.9
 
@@ -18,17 +18,6 @@ _MODEL_DETAILS: dict[str, Any] = {
 }
 
 
-def _read_prompt_file(path: str) -> str | None:
-    """Read prompt content from a file at the given path (any extension).
-
-    Path is absolute or relative to CWD. Returns stripped content or None if empty.
-    Raises FileNotFoundError / OSError on read failure.
-    """
-    file_path = Path(path) if Path(path).is_absolute() else Path.cwd() / path
-    content = file_path.read_text(encoding="utf-8").strip()
-    return content or None
-
-
 def _normalize_prompt_value(value: Any) -> str | None:
     """Return stripped non-empty string, or None for missing/blank/non-string values."""
     if not isinstance(value, str):
@@ -37,11 +26,21 @@ def _normalize_prompt_value(value: Any) -> str | None:
     return stripped or None
 
 
-def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str | None:
-    """Pick between system_prompt_inline and system_prompt_file and return prompt text.
+def _collect_prompt_vars(adapter_params: dict[str, Any]) -> dict[str, Any]:
+    """Merge global `prompts.vars` with per-model `prompt_vars` (model overrides global)."""
+    prompts_section = state.CONFIG.get("prompts") or {}
+    global_vars = prompts_section.get("vars")
+    merged: dict[str, Any] = dict(global_vars) if isinstance(global_vars, dict) else {}
+    model_vars = adapter_params.get("prompt_vars")
+    if isinstance(model_vars, dict):
+        merged.update(model_vars)
+    return merged
 
-    If both are set, prefer the file and emit a warning.
-    Raises FileNotFoundError / OSError when reading the file fails.
+
+def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str | None:
+    """Resolve and render the system prompt via the global Jinja2 environment.
+
+    Raises `PromptRenderError` on rendering failure (propagated to caller).
     """
     inline = _normalize_prompt_value(adapter_params.get("system_prompt_inline"))
     file_path = _normalize_prompt_value(adapter_params.get("system_prompt_file"))
@@ -53,33 +52,33 @@ def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str
             model_id,
             file_path,
         )
+
+    if not file_path and not inline:
+        return None
+
+    env = state.jinja_env
+    assert env is not None, "Jinja2 environment is not initialized"  # noqa: S101
+    variables = _collect_prompt_vars(adapter_params)
+
     if file_path:
-        return _read_prompt_file(file_path)
-    return inline
+        rendered = render_file(env, file_path, variables)
+    else:
+        assert inline is not None  # noqa: S101
+        rendered = render_inline(env, inline, variables)
+
+    stripped = rendered.strip()
+    return stripped or None
 
 
 def apply_system_prompt(
     messages: list[dict[str, Any]], adapter_params: dict[str, Any], model_id: str
 ) -> list[dict[str, Any]]:
-    """Apply resolved system prompt from model config to messages list.
+    """Apply rendered system prompt from model config to the messages list.
 
-    If a prompt is resolved and a system message exists, replace it.
-    If a prompt is resolved but no system message, prepend it.
-    Otherwise return messages unchanged.
+    Raises `PromptRenderError` on rendering failure; callers translate it into
+    a client-facing assistant message.
     """
-    try:
-        resolved = _resolve_system_prompt(adapter_params, model_id)
-    except FileNotFoundError:
-        state.logger.error(
-            "System prompt file not found for model '%s': %s",
-            model_id,
-            adapter_params.get("system_prompt_file"),
-        )
-        return messages
-    except OSError as e:
-        state.logger.error("Failed to read system prompt for model '%s': %s", model_id, e)
-        return messages
-
+    resolved = _resolve_system_prompt(adapter_params, model_id)
     if not resolved:
         return messages
 
@@ -261,7 +260,7 @@ def apply_ip_routing(model_entry: dict[str, Any], client_ip: str) -> dict[str, A
         if key in matching_rule:
             merged[key] = matching_rule[key]
 
-    for key in ("params", "headers"):
+    for key in ("params", "headers", "prompt_vars"):
         if key in matching_rule:
             parent_dict = dict(model_entry.get(key, {}) or {})
             override_dict = matching_rule[key]
@@ -298,7 +297,13 @@ def get_model_config(
         model_entry = apply_ip_routing(model_entry, client_ip)
 
     adapter_params: dict[str, Any] = {}
-    for adapter_key in ("remove_thinking_tags", "system_prompt_inline", "system_prompt_file", "prompt_caching"):
+    for adapter_key in (
+        "remove_thinking_tags",
+        "system_prompt_inline",
+        "system_prompt_file",
+        "prompt_caching",
+        "prompt_vars",
+    ):
         if adapter_key in model_entry:
             adapter_params[adapter_key] = model_entry[adapter_key]
 

@@ -24,6 +24,7 @@ from ollama_adapter.models import (
     get_model_config,
     resolve_model_name,
 )
+from ollama_adapter.prompt_renderer import PromptRenderError
 from ollama_adapter.thinking import StreamContext, process_stream, remove_thinking_tags
 from ollama_adapter.tracing import (
     build_trace_body_metadata,
@@ -47,6 +48,58 @@ class _CompletionContext:
     start_time: float
 
 
+_PROMPT_ERROR_PREFIX = "[PROMPT ERROR]"
+
+
+def _build_prompt_error_payload(ctx: _CompletionContext, response_key: str, error_message: str) -> dict[str, Any]:
+    """Build an Ollama-format response carrying a prompt render error as assistant content."""
+    payload = create_final_response(ctx.display_name, 0, 0, 0)
+    error_text = f"{_PROMPT_ERROR_PREFIX} {error_message}"
+    if response_key == "message":
+        payload["message"] = {"role": "assistant", "content": error_text}
+    else:
+        payload["response"] = error_text
+    return payload
+
+
+def _build_api_params(ctx: _CompletionContext, openai_params: dict[str, Any], *, streaming: bool) -> dict[str, Any]:
+    """Assemble the OpenAI Chat Completions API parameters."""
+    api_params: dict[str, Any] = {
+        "model": openai_params.get("model_id", ctx.original_name),
+        "messages": ctx.messages,
+        "stream": streaming,
+    }
+    if streaming:
+        api_params["stream_options"] = {"include_usage": True}
+    return api_params
+
+
+def _build_extra_body(openai_params: dict[str, Any], ctx: _CompletionContext) -> dict[str, Any]:
+    """Build the OpenAI `extra_body` dict, including trace metadata if configured."""
+    extra_body = {k: v for k, v in openai_params.items() if k != "model_id"}
+    trace_meta = build_trace_body_metadata(ctx.display_name)
+    if trace_meta:
+        extra_body["metadata"] = trace_meta
+    return extra_body
+
+
+def _yield_prompt_error_chunks(
+    ctx: _CompletionContext,
+    response_key: str,
+    make_chunk: Callable[[str, str], dict[str, Any]],
+    exc: PromptRenderError,
+) -> Generator[str]:
+    """Yield two ndjson chunks: the error message and the final done marker."""
+    error_text = f"{_PROMPT_ERROR_PREFIX} {exc}"
+    yield json.dumps(make_chunk(ctx.display_name, error_text)) + "\n"
+    final_error = _build_prompt_error_payload(ctx, response_key, str(exc))
+    if response_key == "message":
+        final_error["message"] = {"role": "assistant", "content": ""}
+    else:
+        final_error["response"] = ""
+    yield json.dumps(final_error) + "\n"
+
+
 def _call_openai_streaming(
     ctx: _CompletionContext,
     make_chunk: Callable[[str, str], dict[str, Any]],
@@ -60,23 +113,18 @@ def _call_openai_streaming(
         raw_ctx = None
         try:
             openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
+            api_params = _build_api_params(ctx, openai_params, streaming=True)
+            extra_body = _build_extra_body(openai_params, ctx)
 
-            api_params: dict[str, Any] = {
-                "model": openai_params.get("model_id", ctx.original_name),
-                "messages": ctx.messages,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-
-            extra_body = {k: v for k, v in openai_params.items() if k != "model_id"}
-
-            api_params["messages"] = apply_system_prompt(api_params["messages"], adapter_params, ctx.model_id)
+            try:
+                api_params["messages"] = apply_system_prompt(api_params["messages"], adapter_params, ctx.model_id)
+            except PromptRenderError as exc:
+                state.logger.error("Prompt render failed (model=%s): %s", ctx.model_id, exc, exc_info=True)
+                yield from _yield_prompt_error_chunks(ctx, response_key, make_chunk, exc)
+                return
             api_params["messages"] = apply_prompt_caching(api_params["messages"], adapter_params, ctx.model_id)
 
             merged_headers = build_trace_headers(extra_headers, ctx.display_name) or None
-            trace_meta = build_trace_body_metadata(ctx.display_name)
-            if trace_meta:
-                extra_body["metadata"] = trace_meta
 
             if tracing_log_headers_enabled():
                 raw_ctx = state.client.chat.completions.with_streaming_response.create(
@@ -129,21 +177,17 @@ def _call_openai_non_streaming(ctx: _CompletionContext, response_key: str) -> Re
     client_ip = get_client_ip()
     openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
 
-    api_params: dict[str, Any] = {
-        "model": openai_params.get("model_id", ctx.original_name),
-        "messages": ctx.messages,
-        "stream": False,
-    }
+    api_params = _build_api_params(ctx, openai_params, streaming=False)
+    extra_body = _build_extra_body(openai_params, ctx)
 
-    extra_body = {k: v for k, v in openai_params.items() if k != "model_id"}
-
-    api_params["messages"] = apply_system_prompt(api_params["messages"], adapter_params, ctx.model_id)
+    try:
+        api_params["messages"] = apply_system_prompt(api_params["messages"], adapter_params, ctx.model_id)
+    except PromptRenderError as exc:
+        state.logger.error("Prompt render failed (model=%s): %s", ctx.model_id, exc, exc_info=True)
+        return jsonify(_build_prompt_error_payload(ctx, response_key, str(exc)))
     api_params["messages"] = apply_prompt_caching(api_params["messages"], adapter_params, ctx.model_id)
 
     merged_headers = build_trace_headers(extra_headers, ctx.display_name) or None
-    trace_meta = build_trace_body_metadata(ctx.display_name)
-    if trace_meta:
-        extra_body["metadata"] = trace_meta
 
     if tracing_log_headers_enabled():
         raw = state.client.chat.completions.with_raw_response.create(

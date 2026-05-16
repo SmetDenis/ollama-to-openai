@@ -9,27 +9,48 @@ import yaml
 from flask import Flask
 
 from ollama_adapter import state
+from ollama_adapter.prompt_renderer import init_jinja_env
 from ollama_adapter.routes import bp
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
-    """Save and restore all mutable globals in state.py between tests."""
+def _reset_state(tmp_path):
+    """Save and restore all mutable globals in state.py between tests.
+
+    Always installs a fresh jinja_env rooted at an empty tmp prompts directory so
+    rendering tests don't share template state.
+    """
     original = {
         "CONFIG": state.CONFIG.copy(),
         "client": state.client,
         "CACHED_MODELS": state.CACHED_MODELS[:],
+        "jinja_env": state.jinja_env,
         "config_file_path": state.config_file_path,
         "last_config_mtime": state.last_config_mtime,
         "last_config_reload_time": state.last_config_reload_time,
     }
+
+    default_prompts = tmp_path / "_default_prompts"
+    default_prompts.mkdir()
+    state.jinja_env = init_jinja_env(default_prompts)
+
     yield
     state.CONFIG = original["CONFIG"]
     state.client = original["client"]
     state.CACHED_MODELS = original["CACHED_MODELS"]
+    state.jinja_env = original["jinja_env"]
     state.config_file_path = original["config_file_path"]
     state.last_config_mtime = original["last_config_mtime"]
     state.last_config_reload_time = original["last_config_reload_time"]
+
+
+@pytest.fixture
+def prompts_dir(tmp_path):
+    """Create a prompts directory and install a fresh jinja_env pointing at it."""
+    d = tmp_path / "prompts"
+    d.mkdir(exist_ok=True)
+    state.jinja_env = init_jinja_env(d)
+    return d
 
 
 @pytest.fixture

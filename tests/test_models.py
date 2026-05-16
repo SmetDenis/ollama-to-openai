@@ -6,7 +6,7 @@ import pytest
 
 from ollama_adapter import state
 from ollama_adapter.models import (
-    _read_prompt_file,
+    _collect_prompt_vars,
     apply_ip_routing,
     apply_prompt_caching,
     apply_system_prompt,
@@ -16,6 +16,7 @@ from ollama_adapter.models import (
     get_model_config,
     resolve_model_name,
 )
+from ollama_adapter.prompt_renderer import PromptRenderError
 
 # ---------------------------------------------------------------------------
 # resolve_model_name
@@ -60,43 +61,35 @@ class TestGetDisplayName:
 
 
 # ---------------------------------------------------------------------------
-# _read_prompt_file
+# _collect_prompt_vars
 # ---------------------------------------------------------------------------
 
 
-class TestReadPromptFile:
-    def test_md_extension(self, tmp_path, monkeypatch):
-        prompt_file = tmp_path / "prompt.md"
-        prompt_file.write_text("Be concise.")
-        monkeypatch.chdir(tmp_path)
-        assert _read_prompt_file("prompt.md") == "Be concise."
+class TestCollectPromptVars:
+    def test_empty_when_nothing_configured(self):
+        state.CONFIG = {}
+        assert _collect_prompt_vars({}) == {}
 
-    def test_txt_extension(self, tmp_path, monkeypatch):
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("From txt file.")
-        monkeypatch.chdir(tmp_path)
-        assert _read_prompt_file("prompt.txt") == "From txt file."
+    def test_only_global_vars(self):
+        state.CONFIG = {"prompts": {"vars": {"company_name": "Acme"}}}
+        assert _collect_prompt_vars({}) == {"company_name": "Acme"}
 
-    def test_no_extension(self, tmp_path, monkeypatch):
-        prompt_file = tmp_path / "PROMPT"
-        prompt_file.write_text("No extension here.")
-        monkeypatch.chdir(tmp_path)
-        assert _read_prompt_file("PROMPT") == "No extension here."
+    def test_only_model_vars(self):
+        state.CONFIG = {}
+        assert _collect_prompt_vars({"prompt_vars": {"role": "senior"}}) == {"role": "senior"}
 
-    def test_absolute_path(self, tmp_path):
-        prompt_file = tmp_path / "test.yml"
-        prompt_file.write_text("Hello prompt")
-        assert _read_prompt_file(str(prompt_file)) == "Hello prompt"
+    def test_model_overrides_global(self):
+        state.CONFIG = {"prompts": {"vars": {"role": "junior", "team": "ml"}}}
+        result = _collect_prompt_vars({"prompt_vars": {"role": "senior"}})
+        assert result == {"role": "senior", "team": "ml"}
 
-    def test_empty_file(self, tmp_path, monkeypatch):
-        prompt_file = tmp_path / "empty.txt"
-        prompt_file.write_text("   ")
-        monkeypatch.chdir(tmp_path)
-        assert _read_prompt_file("empty.txt") is None
+    def test_non_dict_globals_ignored(self):
+        state.CONFIG = {"prompts": {"vars": "not a dict"}}
+        assert _collect_prompt_vars({"prompt_vars": {"role": "x"}}) == {"role": "x"}
 
-    def test_file_not_found(self):
-        with pytest.raises(FileNotFoundError):
-            _read_prompt_file("nonexistent.txt")
+    def test_non_dict_model_vars_ignored(self):
+        state.CONFIG = {"prompts": {"vars": {"a": "1"}}}
+        assert _collect_prompt_vars({"prompt_vars": "not a dict"}) == {"a": "1"}
 
 
 # ---------------------------------------------------------------------------
@@ -117,19 +110,15 @@ class TestApplySystemPrompt:
         assert result[0]["content"] == "injected"
         assert result[1]["role"] == "user"
 
-    def test_file_any_extension(self, tmp_path, monkeypatch):
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("From file.")
-        monkeypatch.chdir(tmp_path)
+    def test_file_any_extension(self, prompts_dir):
+        (prompts_dir / "prompt.txt").write_text("From file.")
         messages = [{"role": "user", "content": "hi"}]
         result = apply_system_prompt(messages, {"system_prompt_file": "prompt.txt"}, "m")
         assert result[0]["role"] == "system"
         assert result[0]["content"] == "From file."
 
-    def test_both_fields_prefer_file(self, tmp_path, monkeypatch, caplog):
-        prompt_file = tmp_path / "p.txt"
-        prompt_file.write_text("file wins")
-        monkeypatch.chdir(tmp_path)
+    def test_both_fields_prefer_file(self, prompts_dir, caplog):
+        (prompts_dir / "p.txt").write_text("file wins")
         messages = [{"role": "user", "content": "hi"}]
         with caplog.at_level("WARNING", logger="ollama_adapter"):
             result = apply_system_prompt(
@@ -154,16 +143,34 @@ class TestApplySystemPrompt:
         )
         assert result == messages
 
-    def test_file_not_found_graceful(self):
+    def test_file_not_found_raises(self):
         messages = [{"role": "user", "content": "hi"}]
-        result = apply_system_prompt(messages, {"system_prompt_file": "missing.txt"}, "m")
-        assert result == messages
+        with pytest.raises(PromptRenderError):
+            apply_system_prompt(messages, {"system_prompt_file": "missing.txt"}, "m")
 
     def test_does_not_mutate_original(self):
         messages = [{"role": "user", "content": "hi"}]
         original = list(messages)
         apply_system_prompt(messages, {"system_prompt_inline": "new"}, "m")
         assert messages == original
+
+    def test_inline_renders_variables(self):
+        state.CONFIG = {"prompts": {"vars": {"company_name": "Acme"}}}
+        messages = [{"role": "user", "content": "hi"}]
+        result = apply_system_prompt(messages, {"system_prompt_inline": "Hello from {{ company_name }}."}, "m")
+        assert result[0]["content"] == "Hello from Acme."
+
+    def test_file_renders_include(self, prompts_dir):
+        (prompts_dir / "snippet.md").write_text("snippet body")
+        (prompts_dir / "main.md").write_text('Intro:\n{% include "snippet.md" %}')
+        messages = [{"role": "user", "content": "hi"}]
+        result = apply_system_prompt(messages, {"system_prompt_file": "main.md"}, "m")
+        assert "snippet body" in result[0]["content"]
+
+    def test_undefined_variable_raises(self):
+        messages = [{"role": "user", "content": "hi"}]
+        with pytest.raises(PromptRenderError):
+            apply_system_prompt(messages, {"system_prompt_inline": "Hello {{ missing }}"}, "m")
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +321,16 @@ class TestApplyIpRouting:
         result = apply_ip_routing(entry, "10.0.0.1")
         assert result["headers"] == {"A": "1", "B": "2"}
 
+    def test_prompt_vars_shallow_merge(self):
+        state.CONFIG = {}
+        entry = {
+            "name": "m",
+            "prompt_vars": {"role": "junior", "team": "ml"},
+            "ip_routing": [{"ip": "10.0.0.1", "prompt_vars": {"role": "admin"}}],
+        }
+        result = apply_ip_routing(entry, "10.0.0.1")
+        assert result["prompt_vars"] == {"role": "admin", "team": "ml"}
+
     def test_scalar_fields_replaced(self):
         state.CONFIG = {}
         entry = self._entry_with_routing()
@@ -382,6 +399,15 @@ class TestGetModelConfig:
         state.CONFIG = full_config
         _, adapter_params, _ = get_model_config("openai/gpt-3.5-turbo")
         assert adapter_params["system_prompt_inline"] == "You are helpful."
+
+    def test_prompt_vars_in_adapter_params(self):
+        state.CONFIG = {
+            "models": [
+                {"name": "openai/gpt-4o", "custom_name": "X", "prompt_vars": {"role": "senior"}},
+            ],
+        }
+        _, adapter_params, _ = get_model_config("X")
+        assert adapter_params["prompt_vars"] == {"role": "senior"}
 
 
 # ---------------------------------------------------------------------------

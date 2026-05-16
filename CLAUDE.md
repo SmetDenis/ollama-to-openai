@@ -8,7 +8,7 @@ Ollama-to-OpenAI adapter — a Python service (Flask) that translates Ollama API
 
 ## Architecture
 
-Modular structure in the `ollama_adapter/` package. Dependencies: Flask, OpenAI SDK, PyYAML.
+Modular structure in the `ollama_adapter/` package. Dependencies: Flask, OpenAI SDK, PyYAML, Jinja2.
 
 ### Module Structure
 
@@ -16,11 +16,12 @@ Modular structure in the `ollama_adapter/` package. Dependencies: Flask, OpenAI 
 ollama_adapter/
   __init__.py          # Empty
   __main__.py          # Entrypoint: create_app + app.run
-  state.py             # Global state: CONFIG, client, CACHED_MODELS
-  config.py            # load_config(), init_state(), hot-reload
+  state.py             # Global state: CONFIG, client, CACHED_MODELS, jinja_env
+  config.py            # load_config(), init_state(), hot-reload, builds jinja_env
   logging_utils.py     # TraceContextFilter, validation, log_request/response, @log_endpoint
   tracing.py           # LiteLLM headers, build_trace_*, capture/log headers
   thinking.py          # remove_thinking_tags(), _process_stream() — 5-state machine
+  prompt_renderer.py   # init_jinja_env(), render_file(), render_inline(), PromptRenderError
   models.py            # Models, prompts, IP-routing, model config
   routes.py            # Flask Blueprint, all endpoints, shared completion helper
   app.py               # create_app() factory, before_request hooks
@@ -28,7 +29,7 @@ ollama_adapter/
 
 ### Import Graph
 
-`state.py` is a leaf node (imports nothing from the package). All modules import `state`. `routes.py` imports `logging_utils`, `tracing`, `thinking`, `models`. `config.py` imports `logging_utils` (TraceContextFilter) and `models` (get_and_cache_models on reload). No circular dependencies.
+`state.py` is a leaf node (imports nothing from the package). All modules import `state`. `prompt_renderer.py` is a leaf (imports only `jinja2`, no project modules). `routes.py` imports `logging_utils`, `tracing`, `thinking`, `models`, `prompt_renderer`. `config.py` imports `logging_utils` (TraceContextFilter), `prompt_renderer` (init_jinja_env), and `models` (get_and_cache_models on reload). `models.py` imports `prompt_renderer`. No circular dependencies.
 
 ### Request Flow
 
@@ -44,9 +45,10 @@ ollama_adapter/
 - **`get_display_name(original_name)`** (`models.py`) — reverse mapping for client responses
 - **`apply_ip_routing(model_entry, client_ip)`** (`models.py`) — applies IP-specific overrides; shallow merge for dict fields
 - **`get_and_cache_models()`** (`models.py`) — fetches models from the OpenAI API, caches in `state.CACHED_MODELS`
-- **`apply_system_prompt(messages, adapter_params, model_id)`** (`models.py`) — injects the system prompt from config; replaces an existing system message or prepends a new one
-- **`_resolve_system_prompt(adapter_params, model_id)`** (`models.py`) — picks between `system_prompt_inline` and `system_prompt_file`; if both are set, the file wins and a warning is logged
-- **`_read_prompt_file(path)`** (`models.py`) — reads prompt content from a file at the given path on every request (hot-reload, any extension supported)
+- **`apply_system_prompt(messages, adapter_params, model_id)`** (`models.py`) — renders and injects the system prompt; propagates `PromptRenderError` to caller
+- **`_resolve_system_prompt(adapter_params, model_id)`** (`models.py`) — picks between `system_prompt_inline` and `system_prompt_file`, renders via `state.jinja_env`; raises `PromptRenderError`
+- **`_collect_prompt_vars(adapter_params)`** (`models.py`) — merges global `prompts.vars` with model `prompt_vars` (model overrides global)
+- **`init_jinja_env(base_dir)`** / **`render_file(env, path, vars)`** / **`render_inline(env, text, vars)`** (`prompt_renderer.py`) — Jinja2 sandboxed renderer; all errors wrap into `PromptRenderError`
 - **`apply_prompt_caching(messages, adapter_params, model_id)`** (`models.py`) — adds `cache_control` markers for Anthropic/Gemini
 - **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — strips `<think>`/`<thinking>` tags
 - **`_process_stream()`** (`thinking.py`) — 5-state machine for streaming tag removal
@@ -54,7 +56,13 @@ ollama_adapter/
 
 ### Prompts Directory
 
-`prompts/` — system prompt files (any extension) referenced by `system_prompt_file` in the model config. Mounted read-only in Docker. Files are re-read on every request — editable without restart.
+`prompts/` (configurable via `prompts.base_dir`) — Jinja2 template files referenced by `system_prompt_file` in the model config. All `system_prompt_file` paths and `{% include "..." %}` directives are resolved **relative to this directory**; absolute paths and `..` are rejected by the sandbox. Mounted read-only in Docker. Files are re-rendered on every request — editable without restart.
+
+### Prompt Templating
+
+Templates are rendered via `jinja2.sandbox.SandboxedEnvironment` with `StrictUndefined`. Errors (missing file, undefined variable, syntax error, sandbox violation, include cycle) raise `PromptRenderError`, which `routes.py` translates into an HTTP 200 Ollama response carrying an `assistant` message that starts with `[PROMPT ERROR] ...`. The request is **not** forwarded to OpenAI on render failure.
+
+Variable priority (low → high): `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow over top-level keys; `prompt_vars` participates in `apply_ip_routing` alongside `params`/`headers`.
 
 ## Commands
 
@@ -84,11 +92,12 @@ uv sync
 - **`clients`**: named IP address groups for `ip_routing`
 - **`logging`**: `log_level`, `log_requests`
 - **`tracing`**: LiteLLM proxy integration — request_id/trace_id, headers, tags
+- **`prompts`**: `base_dir` (default `./prompts`) and `vars` (global Jinja2 variables)
 - **`models`**: model list with a two-level structure:
-  - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt_inline`, `system_prompt_file` (mutually exclusive; file wins on conflict; legacy `system_prompt` deprecated)
+  - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt_inline`, `system_prompt_file` (mutually exclusive; file wins on conflict; legacy `system_prompt` deprecated), `prompt_vars` (overrides global `prompts.vars`)
   - `params`: dict of OpenAI API parameters — passed through without validation
   - `headers`: dict of custom HTTP headers
-  - `ip_routing`: list of IP-specific overrides (inheritance + shallow merge)
+  - `ip_routing`: list of IP-specific overrides (inheritance + shallow merge; `params`, `headers`, `prompt_vars` are dict-merged)
 
 If `models` is empty — all available OpenAI models are exposed. If populated — only the listed ones.
 

@@ -244,6 +244,53 @@ class TestLoadConfigTracing:
 
 
 # ---------------------------------------------------------------------------
+# load_config: validation errors — prompts
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfigPrompts:
+    def test_prompts_not_dict(self, tmp_path, minimal_config):
+        minimal_config["prompts"] = ["bad"]
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(TypeError, match="'prompts' must be a dict"):
+            load_config(str(path))
+
+    def test_prompts_base_dir_must_be_string(self, tmp_path, minimal_config):
+        minimal_config["prompts"] = {"base_dir": 42}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match=r"prompts\.base_dir"):
+            load_config(str(path))
+
+    def test_prompts_vars_non_dict_warns(self, tmp_path, minimal_config, caplog):
+        minimal_config["prompts"] = {"vars": ["bad"]}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with caplog.at_level("WARNING", logger="ollama_adapter"):
+            config = load_config(str(path))
+        assert config["prompts"]["vars"] == {}
+        assert any("prompts.vars" in r.message for r in caplog.records)
+
+    def test_model_prompt_vars_non_dict_warns(self, tmp_path, minimal_config, caplog):
+        minimal_config["models"] = [{"name": "openai/gpt-4o", "prompt_vars": "bad"}]
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with caplog.at_level("WARNING", logger="ollama_adapter"):
+            config = load_config(str(path))
+        assert config["models"][0]["prompt_vars"] == {}
+
+    def test_ip_routing_prompt_vars_non_dict_raises(self, tmp_path, minimal_config):
+        minimal_config["models"] = [
+            {"name": "openai/gpt-4o", "ip_routing": [{"ip": "10.0.0.1", "prompt_vars": "bad"}]},
+        ]
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(TypeError, match="prompt_vars"):
+            load_config(str(path))
+
+
+# ---------------------------------------------------------------------------
 # load_config: file errors
 # ---------------------------------------------------------------------------
 
@@ -275,6 +322,7 @@ class TestInitState:
         assert state.client == "fake-client"
         assert state.config_file_path == str(config_file)
         assert state.last_config_mtime > 0
+        assert state.jinja_env is not None
 
     def test_invalid_config_exits(self, tmp_path):
         path = tmp_path / "bad.yml"
@@ -311,6 +359,8 @@ class TestCheckAndReloadConfig:
             mock_cls.return_value = "client-v1"
             init_state(str(config_file))
 
+        env_before = state.jinja_env
+
         minimal_config["server"]["port"] = 9999
         config_file.write_text(yaml.dump(minimal_config))
 
@@ -324,6 +374,7 @@ class TestCheckAndReloadConfig:
         assert state.CONFIG["server"]["port"] == 9999
         assert state.client == "client-v2"
         assert state.last_config_reload_time is not None
+        assert state.jinja_env is not env_before
 
     def test_invalid_new_config_keeps_old(self, config_file):
         with patch("ollama_adapter.config.OpenAI"):

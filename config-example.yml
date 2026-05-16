@@ -32,6 +32,20 @@ logging:
   log_level: "WARNING"    # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
   log_requests: false     # Whether to log request/response details
 
+# Prompt templates configuration (optional)
+# Jinja2 sandboxed templating for system prompts: includes, variables, conditionals.
+# - base_dir: root directory for system_prompt_file and {% include "..." %} resolution
+#   Includes cannot escape this directory (`..` and absolute paths are rejected).
+#   Default: "./prompts"
+# - vars: global variables available in every rendered prompt as {{ name }}
+#   Override per-model via `prompt_vars` on the model entry or its ip_routing rules.
+# prompts:
+#   base_dir: "./prompts"
+#   vars:
+#     company_name: "Acme Corp"
+#     support_email: "help@acme.com"
+#     default_role: "junior"
+
 # Tracing configuration (optional)
 # Request tracing, correlation IDs, and LiteLLM proxy header integration
 # When enabled, each request gets a unique request_id and trace_id visible in logs
@@ -60,21 +74,25 @@ logging:
 #     - prompt_caching (optional): Enable provider-side prompt caching for system prompts (boolean, default: false)
 #       Adds cache_control markers to system message, enabling caching on Anthropic and
 #       Google Gemini (via LiteLLM). OpenAI caching is automatic and unaffected.
-#     - system_prompt_inline (optional): System prompt as a raw string
-#     - system_prompt_file (optional): Path to a file with the system prompt (any extension)
-#       Absolute or relative to CWD; re-read on every request (hot-reload)
+#     - system_prompt_inline (optional): System prompt as a Jinja2 template string
+#       Supports {{ var }} substitution and {% include "..." %} from prompts.base_dir
+#     - system_prompt_file (optional): Path to a prompt template file (any extension)
+#       Path is RELATIVE to prompts.base_dir; absolute paths and `..` are rejected
+#       File is rendered with Jinja2 on every request (hot-reload, supports includes)
 #       If both fields are set, the file takes precedence and a warning is logged
 #       Either form overrides any system message in client requests
 #       Note: the legacy `system_prompt` key is deprecated and ignored (logs a warning)
+#     - prompt_vars (optional): Dict of variables passed to the Jinja2 template
+#       Merged on top of global prompts.vars (model overrides global, per-key)
 #   params (optional): OpenAI API parameters - passed through as-is without validation
 #     Supports any OpenAI parameter including nested structures (dicts, arrays)
 #   headers (optional): Extra HTTP headers added to OpenAI API requests for this model
 #   ip_routing (optional): List of IP-specific overrides for this model
 #     Each entry has 'ip' (client alias from 'clients' section or direct IP) plus
 #     optional overrides: name, params, headers, system_prompt_inline, system_prompt_file,
-#     remove_thinking_tags, prompt_caching
+#     remove_thinking_tags, prompt_caching, prompt_vars
 #     Unspecified fields inherit from the parent model entry
-#     Dict fields (params, headers) are shallow-merged with parent values
+#     Dict fields (params, headers, prompt_vars) are shallow-merged with parent values
 models:
   # Minimal model - only name required
   - name: openai/gpt-4o-mini
@@ -86,7 +104,9 @@ models:
     custom_name: "GPT-4o Latest"
     remove_thinking_tags: true
     prompt_caching: true
-    system_prompt_file: "prompts/assistant.md"   # any extension works, e.g. prompts/assistant.txt
+    system_prompt_file: "assistant.md"   # resolved as <prompts.base_dir>/assistant.md
+    prompt_vars:
+      role: "senior"                     # overrides prompts.vars.default_role if set
     params:
       temperature: 0.7
       max_tokens: 2000
