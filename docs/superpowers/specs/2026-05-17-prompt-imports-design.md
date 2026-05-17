@@ -9,6 +9,7 @@
 Сейчас `system_prompt_file` в `ollama_adapter/models.py` (`_read_prompt_file`, строки 21–29) читает файл целиком и возвращает его содержимое как есть. Hot-reload работает: файл перечитывается на каждый запрос.
 
 Хочется:
+
 - переиспользовать общие сниппеты (safety guidelines, форматирование, персона) между промптами разных моделей;
 - параметризовать промпты переменными из `config.yml` без копирования.
 
@@ -16,21 +17,21 @@
 
 ## 2. Принятые решения
 
-| Решение | Выбор |
-|---|---|
-| Шаблонизатор | **Jinja2** (`>=3.1.0`) — общий стандарт на будущее |
-| Sandbox | `jinja2.sandbox.SandboxedEnvironment` |
-| Синтаксис include | Родной Jinja2: `{% include "snippets/safety.md" %}` |
-| Синтаксис переменных | Родной Jinja2: `{{ var_name }}` |
-| Подмножество Jinja2 | Полное: include/extends/blocks/if/for/macros/filters |
-| Вложенность include | Рекурсивная; цикл → `RecursionError` → `PromptRenderError` |
-| Резолв путей в include | Относительно `prompts.base_dir` (встроенная защита `FileSystemLoader` от `..`/абсолютных путей) |
-| База для inline-шаблонов | `prompts.base_dir` (настраиваемый в `config.yml`, дефолт `./prompts`) |
-| Переменные | Глобальные `prompts.vars` + переопределение `prompt_vars` на уровне модели и `ip_routing` |
-| Inline vs file | Оба поля проходят через рендер |
-| Undefined переменная | `StrictUndefined` → ошибка |
-| Обработка ошибок | HTTP 200, ответ как `assistant` сообщение с `[PROMPT ERROR] ...` |
-| Безопасность путей | Только внутри `base_dir`; абсолютные пути и `..` запрещены |
+| Решение                  | Выбор                                                                                           |
+|--------------------------|-------------------------------------------------------------------------------------------------|
+| Шаблонизатор             | **Jinja2** (`>=3.1.0`) — общий стандарт на будущее                                              |
+| Sandbox                  | `jinja2.sandbox.SandboxedEnvironment`                                                           |
+| Синтаксис include        | Родной Jinja2: `{% include "snippets/safety.md" %}`                                             |
+| Синтаксис переменных     | Родной Jinja2: `{{ var_name }}`                                                                 |
+| Подмножество Jinja2      | Полное: include/extends/blocks/if/for/macros/filters                                            |
+| Вложенность include      | Рекурсивная; цикл → `RecursionError` → `PromptRenderError`                                      |
+| Резолв путей в include   | Относительно `prompts.base_dir` (встроенная защита `FileSystemLoader` от `..`/абсолютных путей) |
+| База для inline-шаблонов | `prompts.base_dir` (настраиваемый в `config.yml`, дефолт `./prompts`)                           |
+| Переменные               | Глобальные `prompts.vars` + переопределение `prompt_vars` на уровне модели и `ip_routing`       |
+| Inline vs file           | Оба поля проходят через рендер                                                                  |
+| Undefined переменная     | `StrictUndefined` → ошибка                                                                      |
+| Обработка ошибок         | HTTP 200, ответ как `assistant` сообщение с `[PROMPT ERROR] ...`                                |
+| Безопасность путей       | Только внутри `base_dir`; абсолютные пути и `..` запрещены                                      |
 
 ## 3. Архитектура и компоненты
 
@@ -80,16 +81,16 @@ SandboxedEnvironment(
 
 ### 3.4. Изменения по модулям
 
-| Модуль | Изменения |
-|---|---|
-| `state.py` | + `jinja_env: SandboxedEnvironment \| None = None` |
-| `config.py` | При `init_state` и при reload — пересоздаёт `state.jinja_env` через `init_jinja_env(prompts.base_dir or "./prompts")` |
-| `models.py` | Удалить `_read_prompt_file`. `_resolve_system_prompt` вызывает рендерер. Добавить `_collect_prompt_vars`. `apply_ip_routing` мержит поле `prompt_vars` shallow (как `params`/`headers`). `get_model_config` тянет `prompt_vars` в `adapter_params`. `apply_system_prompt` пробрасывает `PromptRenderError` наверх. |
-| `routes.py` | В `chat()`/`generate()` оборачивает вызов `apply_system_prompt` в `try/except PromptRenderError` и возвращает Ollama-формат ответа с assistant message; для streaming — один SSE-чанк + финальный `done`. |
-| `config-example.yml` | Документирует секцию `prompts: { base_dir, vars }` и поле `prompt_vars`. |
-| `README.md` | Раздел «Prompt templates». |
-| `CLAUDE.md` | Обновление Module Structure, Import Graph, Key Functions. |
-| `pyproject.toml` | + `Jinja2 >=3.1.0`. |
+| Модуль               | Изменения                                                                                                                                                                                                                                                                                                          |
+|----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `state.py`           | + `jinja_env: SandboxedEnvironment \| None = None`                                                                                                                                                                                                                                                                 |
+| `config.py`          | При `init_state` и при reload — пересоздаёт `state.jinja_env` через `init_jinja_env(prompts.base_dir or "./prompts")`                                                                                                                                                                                              |
+| `models.py`          | Удалить `_read_prompt_file`. `_resolve_system_prompt` вызывает рендерер. Добавить `_collect_prompt_vars`. `apply_ip_routing` мержит поле `prompt_vars` shallow (как `params`/`headers`). `get_model_config` тянет `prompt_vars` в `adapter_params`. `apply_system_prompt` пробрасывает `PromptRenderError` наверх. |
+| `routes.py`          | В `chat()`/`generate()` оборачивает вызов `apply_system_prompt` в `try/except PromptRenderError` и возвращает Ollama-формат ответа с assistant message; для streaming — один SSE-чанк + финальный `done`.                                                                                                          |
+| `config-example.yml` | Документирует секцию `prompts: { base_dir, vars }` и поле `prompt_vars`.                                                                                                                                                                                                                                           |
+| `README.md`          | Раздел «Prompt templates».                                                                                                                                                                                                                                                                                         |
+| `CLAUDE.md`          | Обновление Module Structure, Import Graph, Key Functions.                                                                                                                                                                                                                                                          |
+| `pyproject.toml`     | + `Jinja2 >=3.1.0`.                                                                                                                                                                                                                                                                                                |
 
 ### 3.5. Граф зависимостей
 
@@ -101,26 +102,26 @@ SandboxedEnvironment(
 
 ```yaml
 prompts:
-  base_dir: ./prompts          # опционально, дефолт = "./prompts"
-  vars:                        # опционально, дефолт = {}
-    company_name: "Acme Corp"
-    support_email: "help@acme.com"
-    default_role: "junior"
+    base_dir: ./prompts          # опционально, дефолт = "./prompts"
+    vars: # опционально, дефолт = {}
+        company_name: "Acme Corp"
+        support_email: "help@acme.com"
+        default_role: "junior"
 ```
 
 ### 4.2. Поля модели
 
 ```yaml
 models:
-  - name: openai/gpt-4o
-    custom_name: "GPT-4o"
-    system_prompt_file: role/main.md   # путь относительно prompts.base_dir
-    prompt_vars:                       # опционально
-      role: "senior"
-    ip_routing:
-      - ip: office
-        prompt_vars:
-          role: "admin"
+    -   name: openai/gpt-4o
+        custom_name: "GPT-4o"
+        system_prompt_file: role/main.md   # путь относительно prompts.base_dir
+        prompt_vars: # опционально
+            role: "senior"
+        ip_routing:
+            -   ip: office
+                prompt_vars:
+                    role: "admin"
 ```
 
 ### 4.3. Правила merge (по возрастанию приоритета)
@@ -156,11 +157,11 @@ Merge — shallow по верхнеуровневым ключам. Поле `pr
 
 1. `@app.before_request` — обнаружив изменение `config.yml`, `load_config()` пересоздаёт `state.jinja_env`.
 2. Handler `chat()`/`generate()`:
-   - `get_model_config(model_id, client_ip)` возвращает `adapter_params` с финальным `prompt_vars` (после `apply_ip_routing`).
-   - `apply_system_prompt`:
-     - `_collect_prompt_vars` мержит `state.CONFIG.prompts.vars` + `adapter_params.prompt_vars`.
-     - В зависимости от полей: `render_file(env, path, vars)` или `render_inline(env, text, vars)`.
-     - Возвращает обновлённый `messages` (replace/prepend, как сейчас).
+    - `get_model_config(model_id, client_ip)` возвращает `adapter_params` с финальным `prompt_vars` (после `apply_ip_routing`).
+    - `apply_system_prompt`:
+        - `_collect_prompt_vars` мержит `state.CONFIG.prompts.vars` + `adapter_params.prompt_vars`.
+        - В зависимости от полей: `render_file(env, path, vars)` или `render_inline(env, text, vars)`.
+        - Возвращает обновлённый `messages` (replace/prepend, как сейчас).
 3. Дальше — обычный flow к OpenAI.
 
 Hot-reload промптов: `auto_reload=True` + `cache_size=0` гарантируют, что Jinja2 перечитывает шаблоны при изменении mtime.
@@ -168,21 +169,30 @@ Hot-reload промптов: `auto_reload=True` + `cache_size=0` гаранти�
 ### 5.2. Error path
 
 При `PromptRenderError`:
+
 - Запрос к OpenAI **не отправляется**.
 - HTTP 200 с Ollama-форматным ответом, где `assistant` сообщение содержит `[PROMPT ERROR] ...`.
 
 ### 5.3. Формат ответа по эндпоинтам
 
 **`/api/chat` non-streaming:**
+
 ```json
 {
-  "model": "<display_name>",
-  "created_at": "<iso>",
-  "message": {"role": "assistant", "content": "[PROMPT ERROR] ..."},
-  "done": true, "done_reason": "stop",
-  "prompt_eval_count": 0, "eval_count": 0,
-  "total_duration": 0, "load_duration": 0,
-  "prompt_eval_duration": 0, "eval_duration": 0
+    "model": "<display_name>",
+    "created_at": "<iso>",
+    "message": {
+        "role": "assistant",
+        "content": "[PROMPT ERROR] ..."
+    },
+    "done": true,
+    "done_reason": "stop",
+    "prompt_eval_count": 0,
+    "eval_count": 0,
+    "total_duration": 0,
+    "load_duration": 0,
+    "prompt_eval_duration": 0,
+    "eval_duration": 0
 }
 ```
 
@@ -208,14 +218,14 @@ state.logger.error("Prompt render failed: %s", exc, exc_info=True)
 
 ### 6.1. Защита из коробки
 
-| Угроза | Защита |
-|---|---|
-| `{% include "../../etc/passwd" %}` | `FileSystemLoader.split_template_path` блокирует `..` и абсолютные пути |
-| `{% include "/etc/passwd" %}` | То же |
-| `{{ ''.__class__.__mro__ }}` | `SandboxedEnvironment` → `SecurityError` |
-| `{{ undefined_var }}` | `StrictUndefined` → `UndefinedError` |
-| Цикл include `a→b→a` | Python `RecursionError` → `PromptRenderError("recursion limit exceeded")` |
-| Бинарный файл в `prompts/` | `UnicodeDecodeError` → `PromptRenderError` |
+| Угроза                             | Защита                                                                    |
+|------------------------------------|---------------------------------------------------------------------------|
+| `{% include "../../etc/passwd" %}` | `FileSystemLoader.split_template_path` блокирует `..` и абсолютные пути   |
+| `{% include "/etc/passwd" %}`      | То же                                                                     |
+| `{{ ''.__class__.__mro__ }}`       | `SandboxedEnvironment` → `SecurityError`                                  |
+| `{{ undefined_var }}`              | `StrictUndefined` → `UndefinedError`                                      |
+| Цикл include `a→b→a`               | Python `RecursionError` → `PromptRenderError("recursion limit exceeded")` |
+| Бинарный файл в `prompts/`         | `UnicodeDecodeError` → `PromptRenderError`                                |
 
 ### 6.2. Что не защищаем (осознанно)
 
@@ -229,37 +239,37 @@ state.logger.error("Prompt render failed: %s", exc, exc_info=True)
 
 ### 6.4. Edge-кейсы
 
-| Кейс | Поведение |
-|---|---|
-| `system_prompt_inline` пустой/whitespace | Игнорируется |
-| Оба `_inline` и `_file` заданы | File выигрывает, лог WARN |
-| Результат рендера — пустая строка | После `.strip()` не применяется |
+| Кейс                                       | Поведение                                                       |
+|--------------------------------------------|-----------------------------------------------------------------|
+| `system_prompt_inline` пустой/whitespace   | Игнорируется                                                    |
+| Оба `_inline` и `_file` заданы             | File выигрывает, лог WARN                                       |
+| Результат рендера — пустая строка          | После `.strip()` не применяется                                 |
 | `prompts.base_dir` не существует на старте | WARN; env создаётся; первый запрос упадёт с `PromptRenderError` |
-| `prompts.base_dir` отсутствует в конфиге | Дефолт = `./prompts` |
-| `prompts.vars` не dict | WARN, `{}` |
-| `prompt_vars` не dict | WARN, `{}` |
-| Литерал `{{` в тексте промпта | `{% raw %}{{ literal }}{% endraw %}` |
-| Промпт-файл изменён в runtime | `auto_reload=True` подхватывает |
-| `config.yml` изменён | `load_config` пересоздаёт `state.jinja_env` |
-| `prompts.base_dir` изменён | Полная пересборка env при reload |
+| `prompts.base_dir` отсутствует в конфиге   | Дефолт = `./prompts`                                            |
+| `prompts.vars` не dict                     | WARN, `{}`                                                      |
+| `prompt_vars` не dict                      | WARN, `{}`                                                      |
+| Литерал `{{` в тексте промпта              | `{% raw %}{{ literal }}{% endraw %}`                            |
+| Промпт-файл изменён в runtime              | `auto_reload=True` подхватывает                                 |
+| `config.yml` изменён                       | `load_config` пересоздаёт `state.jinja_env`                     |
+| `prompts.base_dir` изменён                 | Полная пересборка env при reload                                |
 
 ## 7. Тестирование
 
 ### 7.1. Unit-тесты `tests/test_prompt_renderer.py` (новый файл)
 
-| Тест | Ожидание |
-|---|---|
-| `render_inline` простая подстановка | OK |
-| `render_inline` undefined var | `PromptRenderError` |
-| `render_inline` syntax error | `PromptRenderError` с lineno |
-| `render_inline` обход sandbox (`{{ ''.__class__ }}`) | `PromptRenderError` |
-| `render_file` простой include | OK |
-| `render_file` вложенный include (3 уровня) | OK |
-| `render_file` цикл | `PromptRenderError` ("recursion limit") |
-| `render_file` `{% include "../escape.md" %}` | `PromptRenderError` |
-| `render_file` абсолютный путь в include | `PromptRenderError` |
-| `render_file` бинарный файл | `PromptRenderError` |
-| `render_file` несуществующий корневой шаблон | `PromptRenderError` |
+| Тест                                                 | Ожидание                                |
+|------------------------------------------------------|-----------------------------------------|
+| `render_inline` простая подстановка                  | OK                                      |
+| `render_inline` undefined var                        | `PromptRenderError`                     |
+| `render_inline` syntax error                         | `PromptRenderError` с lineno            |
+| `render_inline` обход sandbox (`{{ ''.__class__ }}`) | `PromptRenderError`                     |
+| `render_file` простой include                        | OK                                      |
+| `render_file` вложенный include (3 уровня)           | OK                                      |
+| `render_file` цикл                                   | `PromptRenderError` ("recursion limit") |
+| `render_file` `{% include "../escape.md" %}`         | `PromptRenderError`                     |
+| `render_file` абсолютный путь в include              | `PromptRenderError`                     |
+| `render_file` бинарный файл                          | `PromptRenderError`                     |
+| `render_file` несуществующий корневой шаблон         | `PromptRenderError`                     |
 
 ### 7.2. Unit-тесты `models.py` (расширения)
 
@@ -283,6 +293,7 @@ state.logger.error("Prompt render failed: %s", exc, exc_info=True)
 ### 7.5. Manual (`tests/manual-check.http`)
 
 Добавить:
+
 1. `chat` с моделью, у которой `system_prompt_file` использует include.
 2. `chat` с заведомо битым промптом (несуществующий include).
 3. `generate` с inline-промптом и vars.
