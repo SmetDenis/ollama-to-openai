@@ -152,7 +152,25 @@ class TestChatNonStreaming:
         resp = client.post("/api/chat", json={"model": "gpt-4o", "messages": []})
         assert resp.status_code == 400
 
-    def test_no_choices_500(self, client, mock_openai_client):
+    def test_no_choices_returns_assistant_message(self, client, mock_openai_client):
+        response = make_mock_completion()
+        response.choices = []
+        mock_openai_client.chat.completions.create.return_value = response
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["done"] is True
+        assert data["message"]["role"] == "assistant"
+        assert "[LLM ERROR]" in data["message"]["content"]
+
+    def test_no_choices_legacy_returns_500_when_disabled(self, client, mock_openai_client):
+        state.CONFIG = {**state.CONFIG, "error_handling": {"enabled": False}}
         response = make_mock_completion()
         response.choices = []
         mock_openai_client.chat.completions.create.return_value = response
@@ -165,7 +183,7 @@ class TestChatNonStreaming:
         )
         assert resp.status_code == 500
 
-    def test_api_error_500(self, client, mock_openai_client):
+    def test_api_error_returns_assistant_message(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
         with patch.object(state.logger, "exception") as mock_log:
             resp = client.post(
@@ -175,8 +193,25 @@ class TestChatNonStreaming:
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["done"] is True
+        assert data["message"]["role"] == "assistant"
+        assert data["message"]["content"].startswith("[LLM ERROR]")
+        assert "API down" in data["message"]["content"]
         mock_log.assert_called_once_with("Chat endpoint error")
+
+    def test_api_error_legacy_returns_500_when_disabled(self, client, mock_openai_client):
+        state.CONFIG = {**state.CONFIG, "error_handling": {"enabled": False}}
+        mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert resp.status_code == 500
 
     def test_thinking_removal(self, client, mock_openai_client, full_config):
         full_config.pop("tracing", None)
@@ -247,7 +282,7 @@ class TestChatStreaming:
         assert last["done"] is True
         assert last["message"]["content"] == ""
 
-    def test_streaming_error_logged(self, client, mock_openai_client):
+    def test_streaming_error_emits_done_chunk(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.side_effect = RuntimeError("stream fail")
         with patch.object(state.logger, "exception") as mock_log:
             resp = client.post(
@@ -259,9 +294,28 @@ class TestChatStreaming:
                 },
             )
             data = collect_stream(resp)
-        assert any("error" in chunk for chunk in data)
+        assert resp.status_code == 200
+        assert any(
+            "[LLM ERROR]" in (chunk.get("message") or {}).get("content", "")
+            for chunk in data
+        )
+        assert data[-1]["done"] is True
         mock_log.assert_called_once()
         assert "Streaming error" in mock_log.call_args[0][0]
+
+    def test_streaming_legacy_error_when_disabled(self, client, mock_openai_client):
+        state.CONFIG = {**state.CONFIG, "error_handling": {"enabled": False}}
+        mock_openai_client.chat.completions.create.side_effect = RuntimeError("stream fail")
+        resp = client.post(
+            "/api/chat",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+        data = collect_stream(resp)
+        assert any("error" in chunk for chunk in data)
 
 
 # ---------------------------------------------------------------------------
@@ -356,15 +410,39 @@ class TestGenerate:
         assert last["done"] is True
         assert "response" in last
 
-    def test_api_error_500(self, client, mock_openai_client):
+    def test_api_error_returns_response_field(self, client, mock_openai_client):
         mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
         with patch.object(state.logger, "exception") as mock_log:
             resp = client.post(
                 "/api/generate",
                 json={"model": "gpt-4o", "prompt": "Write a poem"},
             )
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["done"] is True
+        assert data["response"].startswith("[LLM ERROR]")
+        assert "API down" in data["response"]
         mock_log.assert_called_once_with("Generate endpoint error")
+
+    def test_api_error_legacy_returns_500_when_disabled(self, client, mock_openai_client):
+        state.CONFIG = {**state.CONFIG, "error_handling": {"enabled": False}}
+        mock_openai_client.chat.completions.create.side_effect = RuntimeError("API down")
+        resp = client.post(
+            "/api/generate",
+            json={"model": "gpt-4o", "prompt": "Write a poem"},
+        )
+        assert resp.status_code == 500
+
+    def test_streaming_api_error_emits_done(self, client, mock_openai_client):
+        mock_openai_client.chat.completions.create.side_effect = RuntimeError("boom")
+        resp = client.post(
+            "/api/generate",
+            json={"model": "gpt-4o", "prompt": "Write something", "stream": True},
+        )
+        data = collect_stream(resp)
+        assert resp.status_code == 200
+        assert any("[LLM ERROR]" in chunk.get("response", "") for chunk in data)
+        assert data[-1]["done"] is True
 
     def test_prompt_render_error_non_streaming(self, client, mock_openai_client):
         state.CONFIG = {

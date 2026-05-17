@@ -10,6 +10,8 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from ollama_adapter import state
+from ollama_adapter.error_formatter import format_error_text
+from ollama_adapter.error_formatter import is_enabled as error_handling_enabled
 from ollama_adapter.logging_utils import (
     get_client_ip,
     log_endpoint,
@@ -60,6 +62,29 @@ def _build_prompt_error_payload(ctx: _CompletionContext, response_key: str, erro
     else:
         payload["response"] = error_text
     return payload
+
+
+def _build_runtime_error_payload(display_name: str, response_key: str, error_text: str) -> dict[str, Any]:
+    """Build an Ollama-format response carrying a runtime error as assistant content."""
+    payload = create_final_response(display_name, 0, 0, 0)
+    if response_key == "message":
+        payload["message"] = {"role": "assistant", "content": error_text}
+    else:
+        payload["response"] = error_text
+    return payload
+
+
+def _yield_runtime_error_chunks(
+    ctx: _CompletionContext,
+    response_key: str,
+    make_chunk: Callable[[str, str], dict[str, Any]],
+    error_text: str,
+) -> Generator[str]:
+    """Yield two ndjson chunks: the runtime-error message and the final done marker."""
+    yield json.dumps(make_chunk(ctx.display_name, error_text)) + "\n"
+    final_payload = _build_runtime_error_payload(ctx.display_name, response_key, "")
+    final_payload["done"] = True
+    yield json.dumps(final_payload) + "\n"
 
 
 def _build_api_params(ctx: _CompletionContext, openai_params: dict[str, Any], *, streaming: bool) -> dict[str, Any]:
@@ -163,7 +188,10 @@ def _call_openai_streaming(
 
         except Exception as e:  # noqa: BLE001
             state.logger.exception("Streaming error (model=%s)", ctx.model_id)
-            yield json.dumps({"error": f"Streaming error: {e!s}"}) + "\n"
+            if error_handling_enabled():
+                yield from _yield_runtime_error_chunks(ctx, response_key, make_chunk, format_error_text(e))
+            else:
+                yield json.dumps({"error": f"Streaming error: {e!s}"}) + "\n"
         finally:
             if raw_ctx is not None:
                 raw_ctx.__exit__(None, None, None)
@@ -204,6 +232,9 @@ def _call_openai_non_streaming(ctx: _CompletionContext, response_key: str) -> Re
     duration_ns = int((time.time() - ctx.start_time) * 1e9)
 
     if not response.choices:
+        if error_handling_enabled():
+            error_text = format_error_text(RuntimeError("No response choices returned from upstream"))
+            return jsonify(_build_runtime_error_payload(ctx.display_name, response_key, error_text))
         return jsonify({"error": "No response choices returned from OpenAI"}), 500
 
     final_response = create_final_response(
@@ -221,6 +252,12 @@ def _call_openai_non_streaming(ctx: _CompletionContext, response_key: str) -> Re
         final_response["response"] = cleaned_content
 
     return jsonify(final_response)
+
+
+def _runtime_error_response(display_name: str, response_key: str, exc: Exception) -> Response:
+    """Build a Flask `Response` that delivers a runtime error as Ollama-format content."""
+    payload = _build_runtime_error_payload(display_name, response_key, format_error_text(exc))
+    return jsonify(payload)
 
 
 @bp.route("/api/tags", methods=["GET", "POST"])
@@ -325,9 +362,10 @@ def show_model() -> Response | tuple[Response, int]:
 
 @bp.route("/api/chat", methods=["POST"])
 @log_endpoint
-def chat() -> Response | tuple[Response, int]:
+def chat() -> Response | tuple[Response, int]:  # noqa: PLR0911
     """Forward chat requests to OpenAI."""
     start_time = time.time()
+    display_name_for_error = "unknown"
     try:
         result = validate_json_request()
         if isinstance(result, tuple):
@@ -338,6 +376,7 @@ def chat() -> Response | tuple[Response, int]:
         if isinstance(model_result, tuple):
             return model_result
         model_id = model_result
+        display_name_for_error = model_id
 
         original_name = resolve_model_name(model_id)
 
@@ -368,14 +407,17 @@ def chat() -> Response | tuple[Response, int]:
 
     except Exception as e:  # noqa: BLE001
         state.logger.exception("Chat endpoint error")
+        if error_handling_enabled():
+            return _runtime_error_response(display_name_for_error, "message", e)
         return jsonify({"error": f"Internal server error: {e!s}"}), 500
 
 
 @bp.route("/api/generate", methods=["POST"])
 @log_endpoint
-def generate() -> Response | tuple[Response, int]:
+def generate() -> Response | tuple[Response, int]:  # noqa: PLR0911
     """Generate completions from a prompt (Ollama /api/generate)."""
     start_time = time.time()
+    display_name_for_error = "unknown"
     try:
         result = validate_json_request()
         if isinstance(result, tuple):
@@ -386,6 +428,7 @@ def generate() -> Response | tuple[Response, int]:
         if isinstance(model_result, tuple):
             return model_result
         model_id = model_result
+        display_name_for_error = model_id
 
         original_name = resolve_model_name(model_id)
 
@@ -422,6 +465,8 @@ def generate() -> Response | tuple[Response, int]:
 
     except Exception as e:  # noqa: BLE001
         state.logger.exception("Generate endpoint error")
+        if error_handling_enabled():
+            return _runtime_error_response(display_name_for_error, "response", e)
         return jsonify({"error": f"Internal server error: {e!s}"}), 500
 
 

@@ -46,6 +46,21 @@ logging:
 #     support_email: "help@acme.com"
 #     default_role: "junior"
 
+# Runtime error handling (optional)
+# Controls how /api/chat and /api/generate respond when the upstream LLM provider
+# (LiteLLM, OpenAI, Anthropic, Google) fails. When `enabled: true` (default), the
+# proxy translates rate-limit, auth, timeout, 5xx, connection and unexpected errors
+# into a successful Ollama-format response carrying an assistant message that starts
+# with the configured `prefix` and a short category. Clients (e.g. Raycast) see a
+# readable explanation instead of an HTTP 500 or a half-finished stream.
+# Affects only /api/chat and /api/generate. /api/tags, /api/embed, /api/show, /health
+# keep their HTTP semantics.
+# error_handling:
+#   enabled: true            # set to false to restore legacy HTTP 500 / inline error body
+#   show_details: true       # include the exception message (false → only the category name)
+#   include_type: true       # include the category in the rendered text (false → only details)
+#   prefix: "[LLM ERROR]"    # visible prefix in the assistant message
+
 # Tracing configuration (optional)
 # Request tracing, correlation IDs, and LiteLLM proxy header integration
 # When enabled, each request gets a unique request_id and trace_id visible in logs

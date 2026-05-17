@@ -22,6 +22,7 @@ ollama_adapter/
   tracing.py           # LiteLLM headers, build_trace_*, capture/log headers
   thinking.py          # remove_thinking_tags(), _process_stream() — 5-state machine
   prompt_renderer.py   # init_jinja_env(), render_file(), render_inline(), PromptRenderError
+  error_formatter.py   # categorize_error(), format_error_text() — runtime errors → LLM-style text
   models.py            # Models, prompts, IP-routing, model config
   routes.py            # Flask Blueprint, all endpoints, shared completion helper
   app.py               # create_app() factory, before_request hooks
@@ -50,6 +51,7 @@ ollama_adapter/
 - **`_collect_prompt_vars(adapter_params)`** (`models.py`) — merges global `prompts.vars` with model `prompt_vars` (model overrides global)
 - **`init_jinja_env(base_dir)`** / **`render_file(env, path, vars)`** / **`render_inline(env, text, vars)`** (`prompt_renderer.py`) — Jinja2 sandboxed renderer; all errors wrap into `PromptRenderError`
 - **`apply_prompt_caching(messages, adapter_params, model_id)`** (`models.py`) — adds `cache_control` markers for Anthropic/Gemini
+- **`categorize_error(exc)`** / **`format_error_text(exc)`** / **`is_enabled()`** (`error_formatter.py`) — translate runtime errors into user-facing assistant content
 - **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — strips `<think>`/`<thinking>` tags
 - **`_process_stream()`** (`thinking.py`) — 5-state machine for streaming tag removal
 - **`_call_openai_streaming()`** / **`_call_openai_non_streaming()`** (`routes.py`) — shared helpers for `chat()` and `generate()`
@@ -61,6 +63,10 @@ ollama_adapter/
 ### Prompt Templating
 
 Templates are rendered via `jinja2.sandbox.SandboxedEnvironment` with `StrictUndefined`. Errors (missing file, undefined variable, syntax error, sandbox violation, include cycle) raise `PromptRenderError`, which `routes.py` translates into an HTTP 200 Ollama response carrying an `assistant` message that starts with `[PROMPT ERROR] ...`. The request is **not** forwarded to OpenAI on render failure.
+
+### Runtime Error Handling
+
+`/api/chat` and `/api/generate` (both streaming and non-streaming) translate runtime failures from the upstream LLM provider into a successful Ollama-format response with an `assistant` message that starts with the configured prefix (default `[LLM ERROR]`). Supported categories: `Rate limit`, `Auth`, `Permission denied`, `Not found`, `Unprocessable`, `Bad request`, `Conflict`, `Timeout`, `Connection`, `Upstream 5xx`, `API`, `Unexpected`. Logging of the full stack trace via `state.logger.exception(...)` is preserved. Other endpoints (`/api/tags`, `/api/embed`, `/api/show`, `/health`) keep their HTTP-status semantics. Configurable via the optional `error_handling` section (`enabled`, `show_details`, `include_type`, `prefix`); setting `enabled: false` restores legacy HTTP 500 / inline error body.
 
 Variable priority (low → high): `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow over top-level keys; `prompt_vars` participates in `apply_ip_routing` alongside `params`/`headers`.
 
@@ -93,6 +99,7 @@ uv sync
 - **`logging`**: `log_level`, `log_requests`
 - **`tracing`**: LiteLLM proxy integration — request_id/trace_id, headers, tags
 - **`prompts`**: `base_dir` (default `./prompts`) and `vars` (global Jinja2 variables)
+- **`error_handling`** (optional): `enabled`, `show_details`, `include_type`, `prefix` — controls whether runtime errors in `/api/chat` and `/api/generate` are translated into LLM-style responses (default: enabled, prefix `[LLM ERROR]`)
 - **`models`**: model list with a two-level structure:
   - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt_inline`, `system_prompt_file` (mutually exclusive; file wins on conflict; legacy `system_prompt` deprecated), `prompt_vars` (overrides global `prompts.vars`)
   - `params`: dict of OpenAI API parameters — passed through without validation
