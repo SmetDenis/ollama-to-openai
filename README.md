@@ -13,6 +13,7 @@ A Python service that translates Ollama API requests to OpenAI API calls, enabli
 - Jinja2 prompt templating: `{% include "..." %}` between files and `{{ var }}` substitution
 - Prompt caching support (Anthropic/Gemini via LiteLLM)
 - `<think>`/`<thinking>` tag removal (streaming and non-streaming)
+- Runtime error translation — upstream failures (rate limit, auth, timeout, 5xx) become assistant messages with a `[LLM ERROR]` prefix so clients like Raycast always see a readable explanation instead of an HTTP 500
 - Config hot-reload — changes to `config.yml` apply without restart
 - Request/response logging with optional LiteLLM tracing integration
 - Health monitoring

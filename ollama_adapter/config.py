@@ -266,6 +266,20 @@ def _validate_tracing(tracing_config: Any) -> None:
             raise ValueError(msg)
 
 
+def _validate_error_handling(eh_config: Any) -> None:
+    """Validate the error_handling configuration section."""
+    if not isinstance(eh_config, dict):
+        msg = "'error_handling' must be a dict"
+        raise TypeError(msg)
+    for flag in ("enabled", "show_details", "include_type"):
+        if flag in eh_config and not isinstance(eh_config[flag], bool):
+            msg = f"error_handling.{flag} must be a boolean (true/false)"
+            raise ValueError(msg)
+    if "prefix" in eh_config and not isinstance(eh_config["prefix"], str):
+        msg = "error_handling.prefix must be a string"
+        raise ValueError(msg)
+
+
 def load_config(path: str = "config.yml") -> dict[str, Any]:
     """Load and validate YAML configuration file.
 
@@ -297,6 +311,10 @@ def load_config(path: str = "config.yml") -> dict[str, Any]:
     prompts_config = config.get("prompts")
     if prompts_config is not None:
         _validate_prompts_section(prompts_config)
+
+    error_handling_config = config.get("error_handling")
+    if error_handling_config is not None:
+        _validate_error_handling(error_handling_config)
 
     return config
 

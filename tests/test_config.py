@@ -291,6 +291,60 @@ class TestLoadConfigPrompts:
 
 
 # ---------------------------------------------------------------------------
+# load_config: validation errors — error_handling
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfigErrorHandling:
+    def test_error_handling_not_dict(self, tmp_path, minimal_config):
+        minimal_config["error_handling"] = "yes"
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(TypeError, match="'error_handling' must be a dict"):
+            load_config(str(path))
+
+    def test_error_handling_enabled_not_bool(self, tmp_path, minimal_config):
+        minimal_config["error_handling"] = {"enabled": "yes"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="must be a boolean"):
+            load_config(str(path))
+
+    def test_error_handling_show_details_not_bool(self, tmp_path, minimal_config):
+        minimal_config["error_handling"] = {"show_details": 1}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="must be a boolean"):
+            load_config(str(path))
+
+    def test_error_handling_include_type_not_bool(self, tmp_path, minimal_config):
+        minimal_config["error_handling"] = {"include_type": "yes"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="must be a boolean"):
+            load_config(str(path))
+
+    def test_error_handling_prefix_not_string(self, tmp_path, minimal_config):
+        minimal_config["error_handling"] = {"prefix": ["[oops]"]}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match="prefix must be a string"):
+            load_config(str(path))
+
+    def test_error_handling_full_section_accepted(self, tmp_path, minimal_config):
+        minimal_config["error_handling"] = {
+            "enabled": True,
+            "show_details": False,
+            "include_type": True,
+            "prefix": "[oops]",
+        }
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        config = load_config(str(path))
+        assert config["error_handling"]["prefix"] == "[oops]"
+
+
+# ---------------------------------------------------------------------------
 # load_config: file errors
 # ---------------------------------------------------------------------------
 
