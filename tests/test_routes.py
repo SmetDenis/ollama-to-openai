@@ -295,10 +295,7 @@ class TestChatStreaming:
             )
             data = collect_stream(resp)
         assert resp.status_code == 200
-        assert any(
-            "[LLM ERROR]" in (chunk.get("message") or {}).get("content", "")
-            for chunk in data
-        )
+        assert any("[LLM ERROR]" in (chunk.get("message") or {}).get("content", "") for chunk in data)
         assert data[-1]["done"] is True
         mock_log.assert_called_once()
         assert "Streaming error" in mock_log.call_args[0][0]

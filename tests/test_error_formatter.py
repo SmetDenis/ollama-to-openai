@@ -84,31 +84,41 @@ class TestCategorize:
 class TestRender:
     def test_full_render(self):
         out = ErrorPresentation("Rate limit", "quota exceeded").render(
-            "[LLM ERROR]", include_type=True, show_details=True,
+            "[LLM ERROR]",
+            include_type=True,
+            show_details=True,
         )
         assert out == "[LLM ERROR] Rate limit: quota exceeded"
 
     def test_no_type(self):
         out = ErrorPresentation("Auth", "bad key").render(
-            "[LLM ERROR]", include_type=False, show_details=True,
+            "[LLM ERROR]",
+            include_type=False,
+            show_details=True,
         )
         assert out == "[LLM ERROR] bad key"
 
     def test_no_details(self):
         out = ErrorPresentation("Auth", "bad key").render(
-            "[LLM ERROR]", include_type=True, show_details=False,
+            "[LLM ERROR]",
+            include_type=True,
+            show_details=False,
         )
         assert out == "[LLM ERROR] Auth"
 
     def test_no_type_no_details_falls_back_to_category(self):
         out = ErrorPresentation("Auth", "bad key").render(
-            "[LLM ERROR]", include_type=False, show_details=False,
+            "[LLM ERROR]",
+            include_type=False,
+            show_details=False,
         )
         assert out == "[LLM ERROR] Auth"
 
     def test_custom_prefix(self):
         out = ErrorPresentation("Timeout", "slow").render(
-            "[oops]", include_type=True, show_details=True,
+            "[oops]",
+            include_type=True,
+            show_details=True,
         )
         assert out == "[oops] Timeout: slow"
 
