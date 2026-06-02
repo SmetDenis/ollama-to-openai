@@ -11,6 +11,7 @@ from ollama_adapter import state
 from ollama_adapter.models import (
     _build_datetime_vars,
     _collect_prompt_vars,
+    _select_prompt_source,
     apply_ip_routing,
     apply_prompt_caching,
     apply_system_prompt,
@@ -18,6 +19,7 @@ from ollama_adapter.models import (
     get_and_cache_models,
     get_display_name,
     get_model_config,
+    place_system_message,
     resolve_model_name,
 )
 from ollama_adapter.prompt_renderer import PromptRenderError, render_inline
@@ -597,3 +599,66 @@ class TestDatetimeVarsRendering:
         tmpl = "Base notes.{% if weekday == 'Friday' %} Submit the weekly report.{% endif %}"
         out = render_inline(state.jinja_env, tmpl, variables)
         assert out == "Base notes."
+
+
+# ---------------------------------------------------------------------------
+# _select_prompt_source
+# ---------------------------------------------------------------------------
+
+
+class TestSelectPromptSource:
+    def test_file_wins_over_inline(self):
+        kind, value = _select_prompt_source({"system_prompt_inline": "hi", "system_prompt_file": "a.md"}, "m")
+        assert (kind, value) == ("file", "a.md")
+
+    def test_inline_only(self):
+        assert _select_prompt_source({"system_prompt_inline": "hi"}, "m") == ("inline", "hi")
+
+    def test_none_when_unset(self):
+        assert _select_prompt_source({}, "m") == (None, None)
+
+    def test_blank_values_ignored(self):
+        assert _select_prompt_source({"system_prompt_inline": "   "}, "m") == (None, None)
+
+    def test_file_wins_logs_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="ollama_adapter"):
+            _select_prompt_source({"system_prompt_inline": "hi", "system_prompt_file": "a.md"}, "m")
+        assert any("both" in r.message.lower() for r in caplog.records)
+
+    def test_blank_file_falls_back_to_inline(self):
+        assert _select_prompt_source({"system_prompt_file": "   ", "system_prompt_inline": "hi"}, "m") == (
+            "inline",
+            "hi",
+        )
+
+
+# ---------------------------------------------------------------------------
+# place_system_message
+# ---------------------------------------------------------------------------
+
+
+class TestPlaceSystemMessage:
+    def test_inserts_at_front_when_no_system(self):
+        result = place_system_message([{"role": "user", "content": "hi"}], "SYS")
+        assert result[0] == {"role": "system", "content": "SYS"}
+        assert result[1] == {"role": "user", "content": "hi"}
+
+    def test_replaces_existing_system(self):
+        result = place_system_message([{"role": "system", "content": "old"}, {"role": "user", "content": "hi"}], "NEW")
+        assert result[0] == {"role": "system", "content": "NEW"}
+        assert len(result) == 2
+
+    def test_does_not_mutate_input(self):
+        original = [{"role": "user", "content": "hi"}]
+        place_system_message(original, "SYS")
+        assert original == [{"role": "user", "content": "hi"}]
+
+    def test_empty_list_inserts_system(self):
+        assert place_system_message([], "SYS") == [{"role": "system", "content": "SYS"}]
+
+    def test_skips_non_dict_entries_and_inserts_at_front(self):
+        result = place_system_message(["not-a-dict", {"role": "user", "content": "hi"}], "SYS")
+        assert result[0] == {"role": "system", "content": "SYS"}
+        assert result[1] == "not-a-dict"

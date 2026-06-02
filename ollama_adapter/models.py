@@ -109,10 +109,13 @@ def _collect_prompt_vars(adapter_params: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str | None:
-    """Resolve and render the system prompt via the global Jinja2 environment.
+def _select_prompt_source(adapter_params: dict[str, Any], model_id: str) -> tuple[str | None, str | None]:
+    """Pick the system prompt source: ('file', path), ('inline', text), or (None, None).
 
-    Raises `PromptRenderError` on rendering failure (propagated to caller).
+    Side effect: when BOTH `system_prompt_inline` and `system_prompt_file` are set,
+    'system_prompt_file' wins and a WARNING is logged. This is the single choke-point
+    for source selection (used by both the normal render path and the debug path), so
+    the warning fires exactly once per request regardless of caller.
     """
     inline = _normalize_prompt_value(adapter_params.get("system_prompt_inline"))
     file_path = _normalize_prompt_value(adapter_params.get("system_prompt_file"))
@@ -125,21 +128,49 @@ def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str
             file_path,
         )
 
-    if not file_path and not inline:
+    if file_path:
+        return "file", file_path
+    if inline:
+        return "inline", inline
+    return None, None
+
+
+def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str | None:
+    """Resolve and render the system prompt via the global Jinja2 environment.
+
+    Raises `PromptRenderError` on rendering failure (propagated to caller).
+    """
+    kind, value = _select_prompt_source(adapter_params, model_id)
+    if kind is None:
         return None
 
     env = state.jinja_env
     assert env is not None, "Jinja2 environment is not initialized"  # noqa: S101
     variables = _collect_prompt_vars(adapter_params)
 
-    if file_path:
-        rendered = render_file(env, file_path, variables)
-    else:
-        assert inline is not None  # noqa: S101
-        rendered = render_inline(env, inline, variables)
+    assert value is not None  # noqa: S101
+    rendered = render_file(env, value, variables) if kind == "file" else render_inline(env, value, variables)
 
     stripped = rendered.strip()
     return stripped or None
+
+
+def place_system_message(messages: list[dict[str, Any]], content: str) -> list[dict[str, Any]]:
+    """Return a new list with a system message of `content` placed correctly.
+
+    Replaces the first existing system message; otherwise inserts at index 0.
+    Does not mutate the input list.
+    """
+    result = list(messages)
+    system_msg = {"role": "system", "content": content}
+
+    for i, msg in enumerate(result):
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            result[i] = system_msg
+            return result
+
+    result.insert(0, system_msg)
+    return result
 
 
 def apply_system_prompt(
@@ -154,20 +185,12 @@ def apply_system_prompt(
     if not resolved:
         return messages
 
-    result = list(messages)
-    system_msg = {"role": "system", "content": resolved}
+    had_system = any(isinstance(m, dict) and m.get("role") == "system" for m in messages)
+    result = place_system_message(messages, resolved)
 
-    system_idx = None
-    for i, msg in enumerate(result):
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            system_idx = i
-            break
-
-    if system_idx is not None:
-        result[system_idx] = system_msg
+    if had_system:
         state.logger.debug("Replaced system message for model '%s' with config system_prompt", model_id)
     else:
-        result.insert(0, system_msg)
         state.logger.debug("Prepended system message for model '%s' from config system_prompt", model_id)
 
     return result
