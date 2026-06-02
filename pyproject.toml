@@ -16,12 +16,16 @@ dev = [
     "ruff>=0.15.8",
     "mypy>=1.15",
     "types-PyYAML>=6.0",
-    "pytest>=8.3",
+    "pytest>=9.0.3",
     "pytest-cov>=6.0",
 ]
 
 [tool.uv]
-constraint-dependencies = ["werkzeug>=3.1.6"]
+constraint-dependencies = [
+    "werkzeug>=3.1.6",
+    "idna>=3.15",       # CVE-2026-45409 — ReDoS in idna.encode()
+    "pygments>=2.20.0", # CVE-2026-4539 — ReDoS in AdlLexer
+]
 
 [tool.mypy]
 python_version = "3.13"
