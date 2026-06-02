@@ -23,6 +23,7 @@ ollama_adapter/
   thinking.py          # remove_thinking_tags(), _process_stream() — 5-state machine
   prompt_renderer.py   # init_jinja_env(), render_file(), render_inline(), PromptRenderError
   error_formatter.py   # categorize_error(), format_error_text() — runtime errors → LLM-style text
+  debug_prompt.py      # debug keyword detection + compiled-prompt output (markers)
   models.py            # Models, prompts, IP-routing, model config
   routes.py            # Flask Blueprint, all endpoints, shared completion helper
   app.py               # create_app() factory, before_request hooks
@@ -30,7 +31,7 @@ ollama_adapter/
 
 ### Import Graph
 
-`state.py` is a leaf node (imports nothing from the package). All modules import `state`. `prompt_renderer.py` is a leaf (imports only `jinja2`, no project modules). `routes.py` imports `logging_utils`, `tracing`, `thinking`, `models`, `prompt_renderer`. `config.py` imports `logging_utils` (TraceContextFilter), `prompt_renderer` (init_jinja_env), and `models` (get_and_cache_models on reload). `models.py` imports `prompt_renderer`. No circular dependencies.
+`state.py` is a leaf node (imports nothing from the package). All modules import `state`. `prompt_renderer.py` is a leaf (imports only `jinja2`, no project modules). `debug_prompt.py` is a near-leaf: imports `state`, `models`, and `prompt_renderer` (no circular deps). `routes.py` imports `logging_utils`, `tracing`, `thinking`, `models`, `prompt_renderer`, `debug_prompt`. `config.py` imports `logging_utils` (TraceContextFilter), `prompt_renderer` (init_jinja_env), and `models` (get_and_cache_models on reload). `models.py` imports `prompt_renderer`. No circular dependencies.
 
 ### Request Flow
 
@@ -56,6 +57,10 @@ ollama_adapter/
 - **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — strips `<think>`/`<thinking>` tags
 - **`_process_stream()`** (`thinking.py`) — 5-state machine for streaming tag removal
 - **`_call_openai_streaming()`** / **`_call_openai_non_streaming()`** (`routes.py`) — shared helpers for `chat()` and `generate()`
+- **`is_debug_trigger(text)`** / **`build_debug_content(messages, adapter_params, model_id)`** (`debug_prompt.py`) — detect the `debug` keyword (after stripping markup) and render the fully compiled `messages` array as a fenced block with visible include markers
+- **`render_file_debug(env, path, vars)`** / **`render_inline_debug(env, text, vars)`** (`prompt_renderer.py`) — debug renderers that wrap each `{% include %}` boundary in visible markers via `_DebugMarkerLoader`
+- **`place_system_message(messages, content)`** (`models.py`) — shared system-message placement (replace first system, else insert at index 0), used by both the normal and debug paths
+- **`_select_prompt_source(adapter_params, model_id)`** (`models.py`) — picks `("file", path)` / `("inline", text)` / `(None, None)`; single choke-point that logs the both-set warning
 
 ### Prompts Directory
 
@@ -72,6 +77,10 @@ Every rendered prompt also receives built-in date/time variables computed per re
 `/api/chat` and `/api/generate` (both streaming and non-streaming) translate runtime failures from the upstream LLM provider into a successful Ollama-format response with an `assistant` message that starts with the configured prefix (default `[LLM ERROR]`). Supported categories: `Rate limit`, `Auth`, `Permission denied`, `Not found`, `Unprocessable`, `Bad request`, `Conflict`, `Timeout`, `Connection`, `Upstream 5xx`, `API`, `Unexpected`. Logging of the full stack trace via `state.logger.exception(...)` is preserved. Other endpoints (`/api/tags`, `/api/embed`, `/api/show`, `/health`) keep their HTTP-status semantics. Configurable via the optional `error_handling` section (`enabled`, `show_details`, `include_type`, `prefix`); setting `enabled: false` restores legacy HTTP 500 / inline error body.
 
 Variable priority (low → high): built-in date/time → `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow over top-level keys; `prompt_vars` participates in `apply_ip_routing` alongside `params`/`headers`.
+
+### Debug Prompt Output
+
+If a client's input reduces to the keyword `debug` (markup stripped via `<[^>]*>`, then trimmed and lowercased — this unwraps the Raycast `<user_input>...</user_input>` envelope), `/api/chat` and `/api/generate` short-circuit: instead of calling the upstream model they return an HTTP 200 Ollama response whose assistant content is the fully compiled final `messages` array, wrapped in a fenced code block. Each message is a `═══ message[i] role=... ═══` section; the system prompt shows visible include markers (`── BEGIN file: ... ──`, `── include: ... ──`, `── end include: ... ──`, `── END file: ... ──`). Variables are already substituted and IP routing already applied. Render errors are shown inline as a `── PROMPT RENDER ERROR ──` marker. The feature has no config flag (always on) and the keyword `debug` is hardcoded. Tag stripping affects detection only — messages are displayed verbatim (tags included). Detection: `chat` checks the last user message (string content only); `generate` checks the `prompt`.
 
 ## Commands
 

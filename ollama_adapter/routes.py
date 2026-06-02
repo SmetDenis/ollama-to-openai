@@ -10,6 +10,7 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from ollama_adapter import state
+from ollama_adapter.debug_prompt import build_debug_content, is_debug_trigger, last_user_text
 from ollama_adapter.error_formatter import format_error_text
 from ollama_adapter.error_formatter import is_enabled as error_handling_enabled
 from ollama_adapter.logging_utils import (
@@ -260,6 +261,48 @@ def _runtime_error_response(display_name: str, response_key: str, exc: Exception
     return jsonify(payload)
 
 
+def _build_debug_payload(ctx: _CompletionContext, response_key: str, content: str) -> dict[str, Any]:
+    """Build an Ollama-format response carrying the compiled debug prompt as assistant content."""
+    payload = create_final_response(ctx.display_name, 0, 0, 0)
+    if response_key == "message":
+        payload["message"] = {"role": "assistant", "content": content}
+    else:
+        payload["response"] = content
+    return payload
+
+
+def _yield_debug_chunks(
+    ctx: _CompletionContext,
+    response_key: str,
+    make_chunk: Callable[[str, str], dict[str, Any]],
+    content: str,
+) -> Generator[str]:
+    """Yield the debug content chunk followed by the final done marker (ndjson)."""
+    yield json.dumps(make_chunk(ctx.display_name, content)) + "\n"
+    final_payload = _build_debug_payload(ctx, response_key, "")
+    final_payload["done"] = True
+    yield json.dumps(final_payload) + "\n"
+
+
+def _debug_response(
+    ctx: _CompletionContext,
+    response_key: str,
+    make_chunk: Callable[[str, str], dict[str, Any]],
+    *,
+    streaming: bool,
+) -> Response:
+    """Return the compiled-prompt debug output without calling the upstream model."""
+    client_ip = get_client_ip()
+    _, adapter_params, _ = get_model_config(ctx.model_id, client_ip=client_ip)
+    content = build_debug_content(ctx.messages, adapter_params, ctx.model_id)
+    if streaming:
+        return Response(
+            stream_with_context(_yield_debug_chunks(ctx, response_key, make_chunk, content)),
+            mimetype="application/x-ndjson",
+        )
+    return jsonify(_build_debug_payload(ctx, response_key, content))
+
+
 @bp.route("/api/tags", methods=["GET", "POST"])
 @log_endpoint
 def handle_tags() -> Response | tuple[Response, int]:
@@ -392,16 +435,20 @@ def chat() -> Response | tuple[Response, int]:  # noqa: PLR0911
             start_time=start_time,
         )
 
-        if data.get("stream", False):
+        def make_chat_chunk(dn: str, content: str) -> dict[str, Any]:
+            return {
+                "model": dn,
+                "created_at": datetime.now(tz=UTC).isoformat(),
+                "message": {"role": "assistant", "content": content},
+                "done": False,
+            }
 
-            def make_chat_chunk(dn: str, content: str) -> dict[str, Any]:
-                return {
-                    "model": dn,
-                    "created_at": datetime.now(tz=UTC).isoformat(),
-                    "message": {"role": "assistant", "content": content},
-                    "done": False,
-                }
+        streaming = bool(data.get("stream", False))
 
+        if (text := last_user_text(messages)) is not None and is_debug_trigger(text):
+            return _debug_response(ctx, "message", make_chat_chunk, streaming=streaming)
+
+        if streaming:
             return _call_openai_streaming(ctx, make_chat_chunk, "message")
         return _call_openai_non_streaming(ctx, "message")
 
@@ -450,16 +497,20 @@ def generate() -> Response | tuple[Response, int]:  # noqa: PLR0911
             start_time=start_time,
         )
 
-        if data.get("stream", False):
+        def make_generate_chunk(dn: str, content: str) -> dict[str, Any]:
+            return {
+                "model": dn,
+                "created_at": datetime.now(tz=UTC).isoformat(),
+                "response": content,
+                "done": False,
+            }
 
-            def make_generate_chunk(dn: str, content: str) -> dict[str, Any]:
-                return {
-                    "model": dn,
-                    "created_at": datetime.now(tz=UTC).isoformat(),
-                    "response": content,
-                    "done": False,
-                }
+        streaming = bool(data.get("stream", False))
 
+        if is_debug_trigger(prompt):
+            return _debug_response(ctx, "response", make_generate_chunk, streaming=streaming)
+
+        if streaming:
             return _call_openai_streaming(ctx, make_generate_chunk, "response")
         return _call_openai_non_streaming(ctx, "response")
 

@@ -61,6 +61,11 @@ logging:
 #     company_name: "Acme Corp"
 #     support_email: "help@acme.com"
 #     default_role: "junior"
+#
+# Debug: send the single word "debug" (any case; markup such as the Raycast
+# <user_input>...</user_input> envelope is stripped first) as the chat/generate
+# input to receive the fully compiled prompt + messages array (with include
+# markers) instead of a model response. Always on; not configurable.
 
 # Runtime error handling (optional)
 # Controls how /api/chat and /api/generate respond when the upstream LLM provider

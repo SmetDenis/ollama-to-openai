@@ -6,7 +6,9 @@ from ollama_adapter.prompt_renderer import (
     PromptRenderError,
     init_jinja_env,
     render_file,
+    render_file_debug,
     render_inline,
+    render_inline_debug,
 )
 
 
@@ -115,6 +117,67 @@ class TestRenderFile:
         with pytest.raises(PromptRenderError) as exc_info:
             render_file(env, "main.md", {})
         assert exc_info.value.source == "main.md"
+
+
+# ---------------------------------------------------------------------------
+# PromptRenderError attributes
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# render_file_debug
+# ---------------------------------------------------------------------------
+
+
+class TestRenderFileDebug:
+    def test_single_file_wrapped_in_file_markers(self, env, tmp_path):
+        (tmp_path / "main.md").write_text("Main content")
+        result = render_file_debug(env, "main.md", {})
+        assert "── BEGIN file: main.md ──" in result
+        assert "Main content" in result
+        assert "── END file: main.md ──" in result
+
+    def test_nested_includes_nest_in_order(self, env, tmp_path):
+        (tmp_path / "inner.md").write_text("INNER")
+        (tmp_path / "outer.md").write_text('OUTER\n{% include "inner.md" %}')
+        (tmp_path / "root.md").write_text('ROOT\n{% include "outer.md" %}')
+        r = render_file_debug(env, "root.md", {})
+        assert r.index("── BEGIN file: root.md ──") < r.index("── include: outer.md ──")
+        assert r.index("── include: outer.md ──") < r.index("── include: inner.md ──")
+        assert r.index("── end include: inner.md ──") < r.index("── end include: outer.md ──")
+        assert r.index("── end include: outer.md ──") < r.index("── END file: root.md ──")
+
+    def test_variables_substituted(self, env, tmp_path):
+        (tmp_path / "main.md").write_text("Hello {{ name }}")
+        result = render_file_debug(env, "main.md", {"name": "World"})
+        assert "Hello World" in result
+
+    def test_missing_file_raises(self, env):
+        with pytest.raises(PromptRenderError) as exc_info:
+            render_file_debug(env, "nope.md", {})
+        assert "not found" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# render_inline_debug
+# ---------------------------------------------------------------------------
+
+
+class TestRenderInlineDebug:
+    def test_inline_root_and_include_markers(self, env, tmp_path):
+        (tmp_path / "snip.md").write_text("SNIP")
+        result = render_inline_debug(env, 'HELLO {% include "snip.md" %}', {})
+        assert "── BEGIN inline system_prompt ──" in result
+        assert "── include: snip.md ──" in result
+        assert "SNIP" in result
+        assert "── end include: snip.md ──" in result
+        assert "── END inline system_prompt ──" in result
+
+    def test_inline_without_include(self, env):
+        result = render_inline_debug(env, "Just text {{ x }}", {"x": "1"})
+        assert "── BEGIN inline system_prompt ──" in result
+        assert "Just text 1" in result
+        assert "── END inline system_prompt ──" in result
 
 
 # ---------------------------------------------------------------------------

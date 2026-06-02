@@ -518,6 +518,113 @@ class TestEmbed:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/chat — debug short-circuit
+# ---------------------------------------------------------------------------
+
+
+class TestChatDebug:
+    def _config(self):
+        return {
+            "models": [
+                {
+                    "name": "openai/gpt-4o",
+                    "custom_name": "GPT-4o",
+                    "system_prompt_inline": "You are helpful.",
+                },
+            ],
+        }
+
+    def test_non_streaming_short_circuits(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        resp = client.post(
+            "/api/chat",
+            json={"model": "GPT-4o", "messages": [{"role": "user", "content": "debug"}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "── BEGIN inline system_prompt ──" in data["message"]["content"]
+        assert "You are helpful." in data["message"]["content"]
+        assert data["done"] is True
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_raycast_envelope_short_circuits_verbatim(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        wrapped = '<user_input some=attr some="x">\ndebug\n</user_input>'
+        resp = client.post(
+            "/api/chat",
+            json={"model": "GPT-4o", "messages": [{"role": "user", "content": wrapped}]},
+        )
+        assert resp.status_code == 200
+        assert wrapped in resp.get_json()["message"]["content"]
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_streaming_short_circuits(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        resp = client.post(
+            "/api/chat",
+            json={"model": "GPT-4o", "messages": [{"role": "user", "content": "debug"}], "stream": True},
+        )
+        assert resp.status_code == 200
+        chunks = collect_stream(resp)
+        assert len(chunks) >= 2
+        assert "── BEGIN inline system_prompt ──" in chunks[0]["message"]["content"]
+        assert chunks[-1]["done"] is True
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_non_debug_is_forwarded(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        mock_openai_client.chat.completions.create.return_value = make_mock_completion("Hello!")
+        resp = client.post(
+            "/api/chat",
+            json={"model": "GPT-4o", "messages": [{"role": "user", "content": "debug me"}]},
+        )
+        assert resp.get_json()["message"]["content"] == "Hello!"
+        mock_openai_client.chat.completions.create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/generate — debug short-circuit
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateDebug:
+    def _config(self):
+        return {"models": [{"name": "openai/gpt-4o", "custom_name": "GPT-4o", "system_prompt_inline": "SYS"}]}
+
+    def test_non_streaming_short_circuits_verbatim(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        resp = client.post(
+            "/api/generate",
+            json={"model": "GPT-4o", "prompt": "<user_input>debug</user_input>"},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "── BEGIN inline system_prompt ──" in data["response"]
+        assert "<user_input>debug</user_input>" in data["response"]
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_streaming_short_circuits(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        resp = client.post(
+            "/api/generate",
+            json={"model": "GPT-4o", "prompt": "debug", "stream": True},
+        )
+        assert resp.status_code == 200
+        chunks = collect_stream(resp)
+        assert len(chunks) >= 2
+        assert "── BEGIN inline system_prompt ──" in chunks[0]["response"]
+        assert chunks[-1]["done"] is True
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_non_debug_is_forwarded(self, client, mock_openai_client):
+        state.CONFIG = self._config()
+        mock_openai_client.chat.completions.create.return_value = make_mock_completion("Generated!")
+        resp = client.post("/api/generate", json={"model": "GPT-4o", "prompt": "hello"})
+        assert resp.get_json()["response"] == "Generated!"
+        mock_openai_client.chat.completions.create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # GET /health
 # ---------------------------------------------------------------------------
 
