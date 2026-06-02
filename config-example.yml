@@ -37,10 +37,26 @@ logging:
 # - base_dir: root directory for system_prompt_file and {% include "..." %} resolution
 #   Includes cannot escape this directory (`..` and absolute paths are rejected).
 #   Default: "./prompts"
+# - timezone: IANA timezone for the built-in date/time variables below (default "UTC").
+#   Example: "Europe/Moscow". Invalid names are ignored with a warning (fall back to UTC).
 # - vars: global variables available in every rendered prompt as {{ name }}
 #   Override per-model via `prompt_vars` on the model entry or its ip_routing rules.
+#
+# Built-in date/time variables (injected automatically, computed per request in
+# `timezone`; any same-named entry in `vars`/`prompt_vars` overrides them):
+#   now            -> datetime object: {{ now.year }}, {{ now.month }} (numeric),
+#                     {{ now.strftime('%H:%M') }}, {{ now.isoweekday() }}, ...
+#   year  month  day  hour  minute  weekday
+#                  -> e.g. 2026, "June", 15, 9, 5, "Monday" (month/weekday = English names)
+#   date_human     -> "Monday, June 15, 2026"
+#   time_human     -> "09:05"
+#   datetime_human -> "Monday, June 15, 2026, 09:05"
+#   date_iso       -> "2026-06-15"
+#   datetime_iso   -> "2026-06-15 09:05"
+# Conditionals work too, e.g.:  {% if weekday == "Friday" %}...{% endif %}
 # prompts:
 #   base_dir: "./prompts"
+#   timezone: "UTC"
 #   vars:
 #     company_name: "Acme Corp"
 #     support_email: "help@acme.com"

@@ -11,6 +11,7 @@ A Python service that translates Ollama API requests to OpenAI API calls, enabli
 - IP-based routing — different clients get different models/settings
 - System prompt injection from config (inline or template files, hot-reloaded per request)
 - Jinja2 prompt templating: `{% include "..." %}` between files and `{{ var }}` substitution
+- Built-in date/time placeholders in prompts — `now` object, flat parts (`year`, `month`, `day`, `hour`, `minute`, `weekday`), and presets (`date_human`, `time_human`, `datetime_human`, `date_iso`, `datetime_iso`), computed per request in a configurable `prompts.timezone`; enables conditionals like `{% if weekday == "Friday" %}…{% endif %}`
 - Prompt caching support (Anthropic/Gemini via LiteLLM)
 - `<think>`/`<thinking>` tag removal (streaming and non-streaming)
 - Runtime error translation — upstream failures (rate limit, auth, timeout, 5xx) become assistant messages with a `[LLM ERROR]` prefix so clients like Raycast always see a readable explanation instead of an HTTP 500
@@ -40,28 +41,28 @@ Edit `config.yml` (see `config-example.yml` for a full reference with comments).
 
 ```yaml
 server:
-  host: "0.0.0.0"
-  port: 11434
+    host: "0.0.0.0"
+    port: 11434
 
 openai:
-  api_key: "your-api-key"
-  # base_url: "https://your-litellm-proxy/v1"  # Optional custom endpoint
+    api_key: "your-api-key"
+    # base_url: "https://your-litellm-proxy/v1"  # Optional custom endpoint
 
 logging:
-  log_level: "INFO"
-  log_requests: true
+    log_level: "INFO"
+    log_requests: true
 
 models:
-  - name: openai/gpt-4o-mini
-    custom_name: "GPT-4o Mini"
+    -   name: openai/gpt-4o-mini
+        custom_name: "GPT-4o Mini"
 
-  - name: openai/gpt-4o
-    custom_name: "GPT-4o"
-    remove_thinking_tags: true
-    system_prompt_file: "assistant.md"   # relative to prompts.base_dir
-    params:
-      temperature: 0.7
-      max_tokens: 2000
+    -   name: openai/gpt-4o
+        custom_name: "GPT-4o"
+        remove_thinking_tags: true
+        system_prompt_file: "assistant.md"   # relative to prompts.base_dir
+        params:
+            temperature: 0.7
+            max_tokens: 2000
 ```
 
 ### Model Name Mapping
@@ -70,8 +71,8 @@ Use `custom_name` to expose models under friendly names:
 
 ```yaml
 models:
-  - name: us.anthropic.claude-sonnet-4-5-20250929-v1:0
-    custom_name: "Sonnet 4.5"
+    -   name: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        custom_name: "Sonnet 4.5"
 ```
 
 - `custom_name` is optional — if not specified, the original model name is used
@@ -85,24 +86,24 @@ Route different clients to different backend models based on IP address:
 
 ```yaml
 clients:
-  office:
-    - "192.168.1.100"
-    - "192.168.1.101"
-  home: "10.0.0.5"
+    office:
+        - "192.168.1.100"
+        - "192.168.1.101"
+    home: "10.0.0.5"
 
 models:
-  - name: openai/gpt-4o
-    custom_name: "Assistant"
-    params:
-      temperature: 0.7
-    ip_routing:
-      - ip: "office"
-        name: openai/gpt-4o-mini
+    -   name: openai/gpt-4o
+        custom_name: "Assistant"
         params:
-          temperature: 0.3
-      - ip: "home"
-        params:
-          temperature: 0.9
+            temperature: 0.7
+        ip_routing:
+            -   ip: "office"
+                name: openai/gpt-4o-mini
+                params:
+                    temperature: 0.3
+            -   ip: "home"
+                params:
+                    temperature: 0.9
 ```
 
 Fields not specified in `ip_routing` entries inherit from the parent model. Dict fields (`params`, `headers`) are shallow-merged.
@@ -113,11 +114,11 @@ A model can declare a system prompt either inline or from a file. The two are mu
 
 ```yaml
 models:
-  - name: openai/gpt-4o
-    system_prompt_inline: "You are a helpful assistant."
+    -   name: openai/gpt-4o
+        system_prompt_inline: "You are a helpful assistant."
 
-  - name: openai/gpt-4o-mini
-    system_prompt_file: "assistant.md"   # any extension; resolved under prompts.base_dir
+    -   name: openai/gpt-4o-mini
+        system_prompt_file: "assistant.md"   # any extension; resolved under prompts.base_dir
 ```
 
 - `system_prompt_file` paths are **relative to `prompts.base_dir`** (default `./prompts`). Absolute paths and `..` are rejected to prevent reading files outside the prompts tree.
@@ -130,16 +131,16 @@ Prompts are Jinja2 templates rendered inside a `SandboxedEnvironment`. You get `
 
 ```yaml
 prompts:
-  base_dir: "./prompts"
-  vars:
-    company_name: "Acme Corp"
-    default_role: "junior"
+    base_dir: "./prompts"
+    vars:
+        company_name: "Acme Corp"
+        default_role: "junior"
 
 models:
-  - name: openai/gpt-4o
-    system_prompt_file: "role/main.md"
-    prompt_vars:
-      role: "senior"            # overrides default_role for this model
+    -   name: openai/gpt-4o
+        system_prompt_file: "role/main.md"
+        prompt_vars:
+            role: "senior"            # overrides default_role for this model
 ```
 
 Inside `prompts/role/main.md`:
@@ -151,11 +152,43 @@ You work for {{ company_name }} as a {{ role }} engineer.
 {% include "snippets/style-guide.md" %}
 ```
 
-**Variable priority (low → high):** `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow (top-level keys).
+**Variable priority (low → high):** built-in date/time → `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow (top-level keys).
+
+**Built-in date/time variables.** Every rendered prompt automatically gets the current date/time, computed per request in `prompts.timezone` (IANA name, default `UTC`; e.g. `Europe/Moscow`). Same-named entries in `prompts.vars`/`prompt_vars` override them.
+
+| Variable         | Type          | Example                                                          |
+|------------------|---------------|------------------------------------------------------------------|
+| `now`            | `datetime`    | `{{ now.strftime('%H:%M') }}` → `09:05`, `{{ now.month }}` → `6` |
+| `year`           | int           | `2026`                                                           |
+| `month`          | str (English) | `June`                                                           |
+| `day`            | int           | `15`                                                             |
+| `hour`           | int           | `9`                                                              |
+| `minute`         | int           | `5`                                                              |
+| `weekday`        | str (English) | `Monday`                                                         |
+| `date_human`     | str           | `Monday, June 15, 2026`                                          |
+| `time_human`     | str           | `09:05`                                                          |
+| `datetime_human` | str           | `Monday, June 15, 2026, 09:05`                                   |
+| `date_iso`       | str           | `2026-06-15`                                                     |
+| `datetime_iso`   | str           | `2026-06-15 09:05`                                               |
+
+```yaml
+prompts:
+    timezone: "Europe/Moscow"
+```
+
+Conditionals work with these too:
+
+```jinja
+You are an assistant. Today is {{ date_human }}.
+{% if weekday == "Friday" %}
+Remind the user to submit their weekly report.
+{% endif %}
+```
 
 **Errors are surfaced to the client.** Missing files, undefined variables, syntax errors, sandbox violations, and include cycles all return HTTP 200 with an `assistant` message starting with `[PROMPT ERROR] ...` — the request is not forwarded to OpenAI.
 
 **Security notes:**
+
 - `FileSystemLoader` blocks `..` and absolute paths; templates cannot escape `prompts.base_dir`.
 - `SandboxedEnvironment` blocks access to unsafe attributes (e.g. `__class__`, `__mro__`).
 - Symlinks inside `prompts/` are followed — keep that in mind when constructing the directory.
@@ -166,11 +199,11 @@ You work for {{ company_name }} as a {{ role }} engineer.
 
 ```yaml
 tracing:
-  enabled: true
-  log_headers: true
-  send_trace_headers: true
-  trace_id_prefix: "oa"
-  tags: "ollama-adapter,production"
+    enabled: true
+    log_headers: true
+    send_trace_headers: true
+    trace_id_prefix: "oa"
+    tags: "ollama-adapter,production"
 ```
 
 When enabled, each request gets `request_id`/`trace_id` visible in logs. LiteLLM response headers (cost, duration, model-id) are extracted and logged.

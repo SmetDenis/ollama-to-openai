@@ -289,6 +289,29 @@ class TestLoadConfigPrompts:
         with pytest.raises(TypeError, match="prompt_vars"):
             load_config(str(path))
 
+    def test_prompts_timezone_not_string(self, tmp_path, minimal_config):
+        minimal_config["prompts"] = {"timezone": 123}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with pytest.raises(ValueError, match=r"prompts\.timezone must be a string"):
+            load_config(str(path))
+
+    def test_prompts_timezone_valid(self, tmp_path, minimal_config):
+        minimal_config["prompts"] = {"timezone": "Europe/Moscow"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        config = load_config(str(path))
+        assert config["prompts"]["timezone"] == "Europe/Moscow"
+
+    def test_prompts_timezone_invalid_warns_and_drops(self, tmp_path, minimal_config, caplog):
+        minimal_config["prompts"] = {"timezone": "Mars/Phobos"}
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(minimal_config))
+        with caplog.at_level("WARNING", logger="ollama_adapter"):
+            config = load_config(str(path))
+        assert "timezone" not in config["prompts"]
+        assert any("timezone" in r.message.lower() for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # load_config: validation errors — error_handling

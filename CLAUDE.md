@@ -48,7 +48,8 @@ ollama_adapter/
 - **`get_and_cache_models()`** (`models.py`) — fetches models from the OpenAI API, caches in `state.CACHED_MODELS`
 - **`apply_system_prompt(messages, adapter_params, model_id)`** (`models.py`) — renders and injects the system prompt; propagates `PromptRenderError` to caller
 - **`_resolve_system_prompt(adapter_params, model_id)`** (`models.py`) — picks between `system_prompt_inline` and `system_prompt_file`, renders via `state.jinja_env`; raises `PromptRenderError`
-- **`_collect_prompt_vars(adapter_params)`** (`models.py`) — merges global `prompts.vars` with model `prompt_vars` (model overrides global)
+- **`_collect_prompt_vars(adapter_params)`** (`models.py`) — merges built-in date/time vars with global `prompts.vars` and model `prompt_vars` (user vars override built-ins; model overrides global)
+- **`_build_datetime_vars()`** (`models.py`) — computes per-request built-in date/time template vars (`now` object, flat parts, human/ISO presets) in `prompts.timezone` (default UTC)
 - **`init_jinja_env(base_dir)`** / **`render_file(env, path, vars)`** / **`render_inline(env, text, vars)`** (`prompt_renderer.py`) — Jinja2 sandboxed renderer; all errors wrap into `PromptRenderError`
 - **`apply_prompt_caching(messages, adapter_params, model_id)`** (`models.py`) — adds `cache_control` markers for Anthropic/Gemini
 - **`categorize_error(exc)`** / **`format_error_text(exc)`** / **`is_enabled()`** (`error_formatter.py`) — translate runtime errors into user-facing assistant content
@@ -64,11 +65,13 @@ ollama_adapter/
 
 Templates are rendered via `jinja2.sandbox.SandboxedEnvironment` with `StrictUndefined`. Errors (missing file, undefined variable, syntax error, sandbox violation, include cycle) raise `PromptRenderError`, which `routes.py` translates into an HTTP 200 Ollama response carrying an `assistant` message that starts with `[PROMPT ERROR] ...`. The request is **not** forwarded to OpenAI on render failure.
 
+Every rendered prompt also receives built-in date/time variables computed per request in `prompts.timezone` (IANA name, default `UTC`) by `_build_datetime_vars()` (`models.py`): a `now` datetime object (`{{ now.strftime('%H:%M') }}`, `{{ now.year }}`, ...), flat parts `year`/`month`/`day`/`hour`/`minute`/`weekday` (month and weekday as hardcoded English names — locale/platform independent), and presets `date_human`/`time_human`/`datetime_human`/`date_iso`/`datetime_iso`. They are the lowest-priority layer, so any same-named `prompts.vars`/`prompt_vars` entry overrides them. Conditionals like `{% if weekday == "Friday" %}...{% endif %}` work via these variables.
+
 ### Runtime Error Handling
 
 `/api/chat` and `/api/generate` (both streaming and non-streaming) translate runtime failures from the upstream LLM provider into a successful Ollama-format response with an `assistant` message that starts with the configured prefix (default `[LLM ERROR]`). Supported categories: `Rate limit`, `Auth`, `Permission denied`, `Not found`, `Unprocessable`, `Bad request`, `Conflict`, `Timeout`, `Connection`, `Upstream 5xx`, `API`, `Unexpected`. Logging of the full stack trace via `state.logger.exception(...)` is preserved. Other endpoints (`/api/tags`, `/api/embed`, `/api/show`, `/health`) keep their HTTP-status semantics. Configurable via the optional `error_handling` section (`enabled`, `show_details`, `include_type`, `prefix`); setting `enabled: false` restores legacy HTTP 500 / inline error body.
 
-Variable priority (low → high): `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow over top-level keys; `prompt_vars` participates in `apply_ip_routing` alongside `params`/`headers`.
+Variable priority (low → high): built-in date/time → `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow over top-level keys; `prompt_vars` participates in `apply_ip_routing` alongside `params`/`headers`.
 
 ## Commands
 
@@ -98,7 +101,7 @@ uv sync
 - **`clients`**: named IP address groups for `ip_routing`
 - **`logging`**: `log_level`, `log_requests`
 - **`tracing`**: LiteLLM proxy integration — request_id/trace_id, headers, tags
-- **`prompts`**: `base_dir` (default `./prompts`) and `vars` (global Jinja2 variables)
+- **`prompts`**: `base_dir` (default `./prompts`), `timezone` (IANA name for built-in date/time vars, default `UTC`), and `vars` (global Jinja2 variables)
 - **`error_handling`** (optional): `enabled`, `show_details`, `include_type`, `prefix` — controls whether runtime errors in `/api/chat` and `/api/generate` are translated into LLM-style responses (default: enabled, prefix `[LLM ERROR]`)
 - **`models`**: model list with a two-level structure:
   - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt_inline`, `system_prompt_file` (mutually exclusive; file wins on conflict; legacy `system_prompt` deprecated), `prompt_vars` (overrides global `prompts.vars`)
@@ -112,17 +115,17 @@ Config hot-reload: on every request the file mtime is checked. On change — con
 
 ## API Endpoints
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/chat` | POST | Chat completions (streaming/non-streaming) |
-| `/api/generate` | POST | Text generation (streaming/non-streaming) |
-| `/api/embed` | POST | Embeddings |
-| `/api/tags` | GET/POST | List models |
-| `/api/show` | POST | Model information |
-| `/api/version` | GET | Service version |
-| `/api/ps` | GET | Running models (mock) |
-| `/health` | GET | Health check with OpenAI verification |
-| `/` | GET | Service information |
+| Endpoint        | Method   | Description                                |
+|-----------------|----------|--------------------------------------------|
+| `/api/chat`     | POST     | Chat completions (streaming/non-streaming) |
+| `/api/generate` | POST     | Text generation (streaming/non-streaming)  |
+| `/api/embed`    | POST     | Embeddings                                 |
+| `/api/tags`     | GET/POST | List models                                |
+| `/api/show`     | POST     | Model information                          |
+| `/api/version`  | GET      | Service version                            |
+| `/api/ps`       | GET      | Running models (mock)                      |
+| `/health`       | GET      | Health check with OpenAI verification      |
+| `/`             | GET      | Service information                        |
 
 ## Testing
 

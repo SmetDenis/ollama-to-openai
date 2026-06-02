@@ -1,11 +1,15 @@
 """Tests for ollama_adapter.models module."""
 
+from datetime import datetime
 from typing import Any
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from ollama_adapter import state
 from ollama_adapter.models import (
+    _build_datetime_vars,
     _collect_prompt_vars,
     apply_ip_routing,
     apply_prompt_caching,
@@ -16,7 +20,7 @@ from ollama_adapter.models import (
     get_model_config,
     resolve_model_name,
 )
-from ollama_adapter.prompt_renderer import PromptRenderError
+from ollama_adapter.prompt_renderer import PromptRenderError, render_inline
 
 # ---------------------------------------------------------------------------
 # resolve_model_name
@@ -66,6 +70,13 @@ class TestGetDisplayName:
 
 
 class TestCollectPromptVars:
+    @pytest.fixture(autouse=True)
+    def _no_datetime_vars(self):
+        # Neutralise the built-in date/time base layer so the merge-precedence
+        # assertions below stay focused on user-supplied vars only.
+        with patch("ollama_adapter.models._build_datetime_vars", return_value={}):
+            yield
+
     def test_empty_when_nothing_configured(self):
         state.CONFIG = {}
         assert _collect_prompt_vars({}) == {}
@@ -436,3 +447,153 @@ class TestCreateFinalResponse:
     def test_done_always_true(self):
         resp = create_final_response("m", 0, 0, 0)
         assert resp["done"] is True
+
+
+# ---------------------------------------------------------------------------
+# Built-in date/time variables — sandbox capability guard
+# ---------------------------------------------------------------------------
+
+_FIXED_MONDAY = datetime(2026, 6, 15, 9, 5, tzinfo=ZoneInfo("UTC"))  # .weekday() == 0
+
+
+class TestSandboxAllowsDatetime:
+    def test_sandbox_allows_datetime_methods(self):
+        # state.jinja_env is installed by the autouse _reset_state fixture.
+        out = render_inline(
+            state.jinja_env,
+            "{{ now.strftime('%H:%M') }}|{{ now.year }}|{{ now.weekday() }}",
+            {"now": _FIXED_MONDAY},
+        )
+        assert out == "09:05|2026|0"
+
+
+# ---------------------------------------------------------------------------
+# _build_datetime_vars
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDatetimeVars:
+    def test_flat_and_preset_values(self):
+        state.CONFIG = {}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            v = _build_datetime_vars()
+        assert v["now"] is _FIXED_MONDAY
+        assert v["year"] == 2026
+        assert v["month"] == "June"
+        assert v["day"] == 15
+        assert v["hour"] == 9
+        assert v["minute"] == 5
+        assert v["weekday"] == "Monday"
+        assert v["date_human"] == "Monday, June 15, 2026"
+        assert v["time_human"] == "09:05"
+        assert v["datetime_human"] == "Monday, June 15, 2026, 09:05"
+        assert v["date_iso"] == "2026-06-15"
+        assert v["datetime_iso"] == "2026-06-15 09:05"
+        assert set(v) == {
+            "now",
+            "year",
+            "month",
+            "day",
+            "hour",
+            "minute",
+            "weekday",
+            "date_human",
+            "time_human",
+            "datetime_human",
+            "date_iso",
+            "datetime_iso",
+        }
+
+    def test_uses_configured_timezone(self):
+        state.CONFIG = {"prompts": {"timezone": "Asia/Tokyo"}}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            _build_datetime_vars()
+        assert mock_dt.now.call_args.kwargs["tz"] == ZoneInfo("Asia/Tokyo")
+
+    def test_defaults_to_utc_when_unset(self):
+        state.CONFIG = {}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            _build_datetime_vars()
+        assert mock_dt.now.call_args.kwargs["tz"] == ZoneInfo("UTC")
+
+    def test_invalid_timezone_falls_back_to_utc(self, caplog):
+        state.CONFIG = {"prompts": {"timezone": "Mars/Phobos"}}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            with caplog.at_level("WARNING", logger="ollama_adapter"):
+                _build_datetime_vars()
+        assert mock_dt.now.call_args.kwargs["tz"] == ZoneInfo("UTC")
+        assert any("timezone" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _collect_prompt_vars — built-in date/time base layer + collisions
+# ---------------------------------------------------------------------------
+
+
+class TestCollectPromptVarsDatetime:
+    def test_builtins_present_when_no_user_vars(self):
+        state.CONFIG = {}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            result = _collect_prompt_vars({})
+        assert result["year"] == 2026
+        assert result["weekday"] == "Monday"
+        assert result["date_human"] == "Monday, June 15, 2026"
+
+    def test_global_var_overrides_builtin(self):
+        state.CONFIG = {"prompts": {"vars": {"year": 1999}}}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            result = _collect_prompt_vars({})
+        assert result["year"] == 1999  # user global wins over builtin 2026
+        assert result["month"] == "June"  # untouched builtin remains
+
+    def test_model_var_overrides_builtin(self):
+        state.CONFIG = {}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            result = _collect_prompt_vars({"prompt_vars": {"weekday": "Funday"}})
+        assert result["weekday"] == "Funday"  # model var wins
+        assert result["year"] == 2026  # untouched builtin remains
+
+
+# ---------------------------------------------------------------------------
+# Built-in date/time variables — end-to-end rendering through the sandbox
+# ---------------------------------------------------------------------------
+
+
+class TestDatetimeVarsRendering:
+    def test_builtins_render_through_sandbox(self):
+        state.CONFIG = {}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY
+            variables = _build_datetime_vars()
+        out = render_inline(
+            state.jinja_env,
+            "{{ date_human }} / {{ month }} {{ day }} / {{ now.strftime('%H:%M') }}",
+            variables,
+        )
+        assert out == "Monday, June 15, 2026 / June 15 / 09:05"
+
+    def test_weekday_conditional_block(self):
+        state.CONFIG = {}
+        friday = datetime(2026, 6, 19, 9, 0, tzinfo=ZoneInfo("UTC"))  # .weekday() == 4
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = friday
+            variables = _build_datetime_vars()
+        tmpl = "Base notes.{% if weekday == 'Friday' %} Submit the weekly report.{% endif %}"
+        out = render_inline(state.jinja_env, tmpl, variables)
+        assert out == "Base notes. Submit the weekly report."
+
+    def test_weekday_conditional_block_other_day(self):
+        state.CONFIG = {}
+        with patch("ollama_adapter.models.datetime") as mock_dt:
+            mock_dt.now.return_value = _FIXED_MONDAY  # Monday
+            variables = _build_datetime_vars()
+        tmpl = "Base notes.{% if weekday == 'Friday' %} Submit the weekly report.{% endif %}"
+        out = render_inline(state.jinja_env, tmpl, variables)
+        assert out == "Base notes."

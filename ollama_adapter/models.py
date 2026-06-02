@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ollama_adapter import state
 from ollama_adapter.prompt_renderer import render_file, render_inline
@@ -26,11 +27,82 @@ def _normalize_prompt_value(value: Any) -> str | None:
     return stripped or None
 
 
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+_WEEKDAY_NAMES = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+
+
+def _build_datetime_vars() -> dict[str, Any]:
+    """Build built-in date/time template variables for the current request.
+
+    Computes the current moment in the configured `prompts.timezone` (default UTC)
+    and exposes it three ways: the raw `now` datetime, flat scalar parts, and
+    ready-made human-readable / ISO preset strings. Month and weekday names are
+    hardcoded English (locale- and platform-independent); presets are assembled
+    from integer components to avoid platform-specific strftime directives.
+    """
+    tz_name = (state.CONFIG.get("prompts") or {}).get("timezone") or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        state.logger.warning("Invalid prompts.timezone '%s'; falling back to UTC", tz_name)
+        tz = ZoneInfo("UTC")
+
+    now = datetime.now(tz=tz)
+    month = _MONTH_NAMES[now.month - 1]
+    weekday = _WEEKDAY_NAMES[now.weekday()]
+    time_human = f"{now.hour:02d}:{now.minute:02d}"
+    date_human = f"{weekday}, {month} {now.day}, {now.year}"
+    date_iso = now.date().isoformat()
+
+    return {
+        "now": now,
+        "year": now.year,
+        "month": month,
+        "day": now.day,
+        "hour": now.hour,
+        "minute": now.minute,
+        "weekday": weekday,
+        "date_human": date_human,
+        "time_human": time_human,
+        "datetime_human": f"{date_human}, {time_human}",
+        "date_iso": date_iso,
+        "datetime_iso": f"{date_iso} {time_human}",
+    }
+
+
 def _collect_prompt_vars(adapter_params: dict[str, Any]) -> dict[str, Any]:
-    """Merge global `prompts.vars` with per-model `prompt_vars` (model overrides global)."""
+    """Merge built-in date/time vars with global `prompts.vars` and per-model `prompt_vars`.
+
+    Precedence (low -> high): built-in date/time -> global vars -> model vars.
+    User-defined vars always override built-ins (backward compatible with a static
+    `year` defined in config).
+    """
+    merged: dict[str, Any] = _build_datetime_vars()
     prompts_section = state.CONFIG.get("prompts") or {}
     global_vars = prompts_section.get("vars")
-    merged: dict[str, Any] = dict(global_vars) if isinstance(global_vars, dict) else {}
+    if isinstance(global_vars, dict):
+        merged.update(global_vars)
     model_vars = adapter_params.get("prompt_vars")
     if isinstance(model_vars, dict):
         merged.update(model_vars)

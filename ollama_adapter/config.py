@@ -5,6 +5,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from jinja2.sandbox import SandboxedEnvironment
@@ -209,6 +210,20 @@ def _validate_prompts_section(prompts_config: Any) -> None:
     if base_dir is not None and (not isinstance(base_dir, str) or not base_dir.strip()):
         msg = "'prompts.base_dir' must be a non-empty string"
         raise ValueError(msg)
+
+    timezone = prompts_config.get("timezone")
+    if timezone is not None:
+        if not isinstance(timezone, str):
+            msg = "prompts.timezone must be a string"
+            raise ValueError(msg)
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            state.logger.warning(
+                "prompts.timezone '%s' is not a valid IANA zone; ignoring (using UTC)",
+                timezone,
+            )
+            prompts_config.pop("timezone", None)
 
     vars_config = prompts_config.get("vars")
     if vars_config is None:
