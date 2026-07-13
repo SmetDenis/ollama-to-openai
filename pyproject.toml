@@ -57,4 +57,4 @@ tmp_path_retention_policy = "none"
 
 [tool.ruff.lint.per-file-ignores]
 "__main__.py" = ["INP001"]
-"tests/**/*.py" = ["S101", "S104", "PLR2004", "D", "ANN", "ERA001", "PLC0415", "ARG002", "RUF059", "PT011"]
+"tests/**/*.py" = ["S101", "S104", "S105", "PLR2004", "D", "ANN", "ERA001", "PLC0415", "ARG002", "RUF059", "PT011"]

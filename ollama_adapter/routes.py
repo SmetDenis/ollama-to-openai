@@ -10,7 +10,13 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from ollama_adapter import state
-from ollama_adapter.debug_prompt import build_debug_content, is_debug_trigger, last_user_text
+from ollama_adapter.debug_prompt import (
+    build_config_view,
+    build_debug_content,
+    build_outgoing_view,
+    is_debug_trigger,
+    last_user_text,
+)
 from ollama_adapter.error_formatter import format_error_text
 from ollama_adapter.error_formatter import is_enabled as error_handling_enabled
 from ollama_adapter.logging_utils import (
@@ -293,8 +299,18 @@ def _debug_response(
 ) -> Response:
     """Return the compiled-prompt debug output without calling the upstream model."""
     client_ip = get_client_ip()
-    _, adapter_params, _ = get_model_config(ctx.model_id, client_ip=client_ip)
-    content = build_debug_content(ctx.messages, adapter_params, ctx.model_id)
+    openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
+
+    # Mirror the real call: same helpers assemble what actually goes upstream.
+    extra_body = _build_extra_body(openai_params, ctx)
+    merged_headers = build_trace_headers(extra_headers, ctx.display_name)
+
+    config_view = build_config_view(ctx.model_id, openai_params, adapter_params, extra_headers)
+    outgoing_view = build_outgoing_view(openai_params, extra_body, merged_headers)
+
+    content = build_debug_content(
+        ctx.messages, adapter_params, ctx.model_id, config_view=config_view, outgoing_view=outgoing_view
+    )
     if streaming:
         return Response(
             stream_with_context(_yield_debug_chunks(ctx, response_key, make_chunk, content)),

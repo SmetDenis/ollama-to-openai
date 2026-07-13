@@ -57,7 +57,9 @@ ollama_adapter/
 - **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — strips `<think>`/`<thinking>` tags
 - **`_process_stream()`** (`thinking.py`) — 5-state machine for streaming tag removal
 - **`_call_openai_streaming()`** / **`_call_openai_non_streaming()`** (`routes.py`) — shared helpers for `chat()` and `generate()`
-- **`is_debug_trigger(text)`** / **`build_debug_content(messages, adapter_params, model_id)`** (`debug_prompt.py`) — detect the `debug` keyword (after stripping markup) and render the fully compiled `messages` array as a fenced block with visible include markers
+- **`is_debug_trigger(text)`** / **`build_debug_content(messages, adapter_params, model_id, *, config_view, outgoing_view)`** (`debug_prompt.py`) — detect the `debug` keyword (after stripping markup) and render the fully compiled `messages` array as a fenced block with visible include markers, optionally preceded by `model config` / `outgoing request` JSON sections
+- **`build_config_view(model_id, openai_params, adapter_params, headers)`** / **`build_outgoing_view(openai_params, extra_body, merged_headers)`** (`debug_prompt.py`) — shape the final combined model config (post IP-routing) and the actual upstream request for the debug sections
+- **`_mask_secrets(obj)`** / **`_is_sensitive_key(key)`** (`debug_prompt.py`) — recursively mask values under secret-bearing keys (auth/api-key/token/secret/password/cookie, whole-word match so `max_tokens` is safe) before rendering debug JSON
 - **`render_file_debug(env, path, vars)`** / **`render_inline_debug(env, text, vars)`** (`prompt_renderer.py`) — debug renderers that wrap each `{% include %}` boundary in visible markers via `_DebugMarkerLoader`
 - **`place_system_message(messages, content)`** (`models.py`) — shared system-message placement (replace first system, else insert at index 0), used by both the normal and debug paths
 - **`_select_prompt_source(adapter_params, model_id)`** (`models.py`) — picks `("file", path)` / `("inline", text)` / `(None, None)`; single choke-point that logs the both-set warning
@@ -80,7 +82,15 @@ Variable priority (low → high): built-in date/time → `prompts.vars` → `mod
 
 ### Debug Prompt Output
 
-If a client's input reduces to the keyword `debug` (markup stripped via `<[^>]*>`, then trimmed and lowercased — this unwraps the Raycast `<user_input>...</user_input>` envelope), `/api/chat` and `/api/generate` short-circuit: instead of calling the upstream model they return an HTTP 200 Ollama response whose assistant content is the fully compiled final `messages` array, wrapped in a fenced code block. Each message is a `═══ message[i] role=... ═══` section; the system prompt shows visible include markers (`── BEGIN file: ... ──`, `── include: ... ──`, `── end include: ... ──`, `── END file: ... ──`). Variables are already substituted and IP routing already applied. Render errors are shown inline as a `── PROMPT RENDER ERROR ──` marker. The feature has no config flag (always on) and the keyword `debug` is hardcoded. Tag stripping affects detection only — messages are displayed verbatim (tags included). Detection: `chat` checks the last user message (string content only); `generate` checks the `prompt`.
+If a client's input reduces to the keyword `debug` (markup stripped via `<[^>]*>`, then trimmed and lowercased — this unwraps the Raycast `<user_input>...</user_input>` envelope), `/api/chat` and `/api/generate` short-circuit: instead of calling the upstream model they return an HTTP 200 Ollama response whose assistant content is the fully compiled request, wrapped in a single fenced code block.
+
+The block opens with two JSON sections, then the compiled `messages` array:
+- `═══ model config ═══` — the final **combined** model configuration after IP routing and all merges (what was actually used): `requested_model` (name sent by the client), `resolved_model` (the upstream model actually used), `params` (OpenAI params minus the internal `model_id`), `headers`, and `adapter` (remove_thinking_tags / prompt_caching / system_prompt source / prompt_vars).
+- `═══ outgoing request ═══` — what actually goes upstream, assembled by the **same** helpers as a real call (`_build_extra_body`, `build_trace_headers`): `model`, `extra_body` (params plus trace `metadata` when tracing is on), and `extra_headers` (configured headers merged with trace headers). `messages` are omitted here — they appear verbatim below.
+
+Both JSON sections pass through `_mask_secrets`: values under secret-bearing keys (auth/api-key/token/secret/password/cookie, matched as whole words so `max_tokens` is not masked) are shown as `abcd…wxyz` (or `****` when short). The masking is display-only and never appears in the real request.
+
+Then each message is a `═══ message[i] role=... ═══` section; the system prompt shows visible include markers (`── BEGIN file: ... ──`, `── include: ... ──`, `── end include: ... ──`, `── END file: ... ──`). Variables are already substituted and IP routing already applied. Render errors are shown inline as a `── PROMPT RENDER ERROR ──` marker. The feature has no config flag (always on) and the keyword `debug` is hardcoded. Tag stripping affects detection only — messages are displayed verbatim (tags included). Detection: `chat` checks the last user message (string content only); `generate` checks the `prompt`.
 
 ## Commands
 

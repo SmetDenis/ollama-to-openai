@@ -581,6 +581,57 @@ class TestChatDebug:
         assert resp.get_json()["message"]["content"] == "Hello!"
         mock_openai_client.chat.completions.create.assert_called_once()
 
+    def test_debug_shows_combined_config_and_outgoing(self, client, mock_openai_client):
+        state.CONFIG = {
+            "tracing": {"enabled": True, "send_trace_headers": True, "tags": "t"},
+            "models": [
+                {
+                    "name": "openai/gpt-4o",
+                    "custom_name": "GPT-4o",
+                    "params": {"temperature": 0.7},
+                    "headers": {"Authorization": "Bearer sk-secret-abcdef"},
+                    "system_prompt_inline": "You are helpful.",
+                },
+            ],
+        }
+        resp = client.post(
+            "/api/chat",
+            json={"model": "GPT-4o", "messages": [{"role": "user", "content": "debug"}]},
+        )
+        assert resp.status_code == 200
+        content = resp.get_json()["message"]["content"]
+        assert "═══ model config ═══" in content
+        assert "═══ outgoing request ═══" in content
+        assert '"requested_model": "GPT-4o"' in content
+        assert '"resolved_model": "openai/gpt-4o"' in content
+        assert '"temperature": 0.7' in content
+        # secret header is masked, never shown verbatim
+        assert "sk-secret-abcdef" not in content
+        # trace metadata is part of what actually goes out
+        assert "adapter_model" in content
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_debug_reflects_ip_routing_override(self, client, mock_openai_client):
+        state.CONFIG = {
+            "models": [
+                {
+                    "name": "openai/gpt-3.5-turbo",
+                    "custom_name": "Chat",
+                    "params": {"temperature": 0.9},
+                    "ip_routing": [{"ip": "192.168.1.100", "params": {"temperature": 0.1}}],
+                },
+            ],
+        }
+        resp = client.post(
+            "/api/chat",
+            json={"model": "Chat", "messages": [{"role": "user", "content": "debug"}]},
+            headers={"X-Forwarded-For": "192.168.1.100"},
+        )
+        content = resp.get_json()["message"]["content"]
+        # combined (routed) value wins, base 0.9 is not shown
+        assert '"temperature": 0.1' in content
+        assert '"temperature": 0.9' not in content
+
 
 # ---------------------------------------------------------------------------
 # POST /api/generate — debug short-circuit
