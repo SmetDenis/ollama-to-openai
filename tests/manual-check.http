@@ -132,7 +132,7 @@ Content-Type: application/json
 GET http://127.0.0.1:11434/api/ps
 Accept: application/json
 
-### 16. Error Test - Invalid model name
+### 16. Error Test - Invalid model name (404 when config `models` is non-empty; forwarded upstream otherwise)
 POST http://127.0.0.1:11434/api/chat
 Accept: application/json
 Content-Type: application/json
@@ -311,3 +311,135 @@ x-litellm-trace-id: generate-trace-456
     "prompt": "Hello",
     "stream": false
 }
+
+###########################################################################
+# OpenAI-compatible API (/v1)
+# If openai_api.api_keys is set, replace the key below; otherwise any key works.
+###########################################################################
+
+### 28. /v1 - List models
+GET http://127.0.0.1:11434/v1/models
+Authorization: Bearer sk-local-change-me
+
+### 29. /v1 - Retrieve a model (id may contain "/")
+GET http://127.0.0.1:11434/v1/models/openai/gpt-4o-mini
+Authorization: Bearer sk-local-change-me
+
+### 30. /v1 - Chat completion (non-streaming)
+POST http://127.0.0.1:11434/v1/chat/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Ping?"}]
+}
+
+### 31. /v1 - Chat completion (streaming with usage chunk)
+POST http://127.0.0.1:11434/v1/chat/completions
+Authorization: Bearer sk-local-change-me
+Accept: text/event-stream
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Write a haiku about proxies."}],
+    "stream": true,
+    "stream_options": {"include_usage": true}
+}
+
+### 32. /v1 - Tool calling (expect tool_calls + finish_reason "tool_calls")
+POST http://127.0.0.1:11434/v1/chat/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a city",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+            }
+        }
+    ]
+}
+
+### 33. /v1 - Image content part
+POST http://127.0.0.1:11434/v1/chat/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What color is this pixel?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="}}
+            ]
+        }
+    ]
+}
+
+### 34. /v1 - Developer role + system_prompt_mode (send "debug" to inspect the merge)
+POST http://127.0.0.1:11434/v1/chat/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+        {"role": "developer", "content": "You are a coding agent with tools."},
+        {"role": "user", "content": "debug"}
+    ]
+}
+
+### 35. /v1 - Legacy completion (non-streaming)
+POST http://127.0.0.1:11434/v1/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "prompt": "Say hello in French:",
+    "max_tokens": 20
+}
+
+### 36. /v1 - Legacy completion (streaming)
+POST http://127.0.0.1:11434/v1/completions
+Authorization: Bearer sk-local-change-me
+Accept: text/event-stream
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "prompt": "Count to five:",
+    "stream": true
+}
+
+### 37. /v1 - Error: missing/invalid API key (expect 401 when api_keys is set)
+GET http://127.0.0.1:11434/v1/models
+Authorization: Bearer wrong-key
+
+### 38. /v1 - Error: unsupported suffix (expect 400 unsupported_parameter)
+POST http://127.0.0.1:11434/v1/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "prompt": "def add(a, b):",
+    "suffix": "return result"
+}
+
+### 39. /v1 - Error: unknown endpoint (expect 404 unknown_url)
+POST http://127.0.0.1:11434/v1/responses
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{}

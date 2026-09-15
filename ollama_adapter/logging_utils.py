@@ -10,7 +10,7 @@ from flask import Response, g, jsonify, request
 
 from ollama_adapter import state
 
-_TRUNCATED_FIELDS = {"messages", "prompt"}
+_TRUNCATED_FIELDS = {"messages", "prompt", "tools"}
 _TRUNCATE_THRESHOLD = 100
 _LARGE_RESPONSE_THRESHOLD = 500
 _RESPONSE_PREVIEW_LENGTH = 200
@@ -121,7 +121,7 @@ def log_response(
     elif response_data:
         if isinstance(response_data, dict):
             if (
-                any(key in response_data for key in ("models", "embeddings"))
+                any(key in response_data for key in ("models", "embeddings", "data"))
                 and len(str(response_data)) > _LARGE_RESPONSE_THRESHOLD
             ):
                 log_data["response"] = {

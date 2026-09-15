@@ -1,15 +1,16 @@
 # Ollama to OpenAI Adapter
 
-A Python service that translates Ollama API requests to OpenAI API calls, enabling Ollama clients to use OpenAI models (and compatible providers via LiteLLM) seamlessly.
+A Python service that translates Ollama API requests to OpenAI API calls, enabling Ollama clients to use OpenAI models (and compatible providers via LiteLLM) seamlessly. It also exposes an OpenAI-compatible API under `/v1` on the same port, so IDE agents, chat UIs and OpenAI SDK scripts get the same adapter features.
 
 ## Features
 
 - Complete Ollama API compatibility (chat, generate, embed, tags, show)
+- OpenAI-compatible API under `/v1` (chat completions, legacy completions, models) — faithful passthrough of tools, reasoning content and provider fields, real HTTP error codes, optional API keys
 - Streaming and non-streaming responses
 - Model name mapping (`custom_name`) with bidirectional resolution
 - Per-model configuration: parameters, headers, system prompts
 - IP-based routing — different clients get different models/settings
-- System prompt injection from config (inline or template files, hot-reloaded per request)
+- System prompt injection from config (inline or template files, hot-reloaded per request); replace, prepend or append to the client's own system message
 - Jinja2 prompt templating: `{% include "..." %}` between files and `{{ var }}` substitution
 - Built-in date/time placeholders in prompts — `now` object, flat parts (`year`, `month`, `day`, `hour`, `minute`, `weekday`), and presets (`date_human`, `time_human`, `datetime_human`, `date_iso`, `datetime_iso`), computed per request in a configurable `prompts.timezone`; enables conditionals like `{% if weekday == "Friday" %}…{% endif %}`
 - Prompt caching support (Anthropic/Gemini via LiteLLM)
@@ -79,6 +80,7 @@ models:
 - `custom_name` must be unique across all models
 - Clients can use either the custom name or the original name in requests
 - Responses return the custom name to clients
+- When `models` is non-empty it is an allowlist: any other model name gets HTTP 404 on `/api/chat`, `/api/generate`, `/api/embed`, `/api/show` and `/v1/chat/completions`, `/v1/completions` (this also keeps clients from bypassing per-model `params` limits). **List embedding models too** if you use `/api/embed`. With an empty `models` list every upstream model is allowed.
 
 ### IP-Based Routing
 
@@ -123,6 +125,10 @@ models:
 
 - `system_prompt_file` paths are **relative to `prompts.base_dir`** (default `./prompts`). Absolute paths and `..` are rejected to prevent reading files outside the prompts tree.
 - Templates are re-rendered on every request — file edits and config changes take effect without a restart.
+- `system_prompt_mode` controls what happens when the client sends its own system message (the first `system` or `developer` message):
+  - `replace` (default) — the config prompt replaces it
+  - `prepend` / `append` — the config prompt is joined before/after it (blank line for strings, an extra text part for content-part lists). Use this for IDE agents whose system message carries tool instructions.
+  Allowed in `ip_routing` overrides too. Without a client system message the config prompt is always inserted first. On `/v1` a warning is logged whenever `replace` discards a non-empty client system/developer message.
 - The legacy `system_prompt` field is no longer recognized — it is ignored and a deprecation warning is logged. Migrate to `system_prompt_inline` or `system_prompt_file`.
 
 ### Prompt Templates
@@ -195,6 +201,33 @@ Remind the user to submit their weekly report.
 
 **Breaking change from earlier versions:** `system_prompt_file` paths were resolved against CWD; they are now resolved against `prompts.base_dir`. Rewrite `system_prompt_file: prompts/main.md` as `system_prompt_file: main.md` (and put the file inside `prompts/`).
 
+### OpenAI-compatible API (`/v1`)
+
+Point any OpenAI client at `http://<host>:11434/v1`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="sk-local-1")
+client.chat.completions.create(model="GPT-4o Mini", messages=[{"role": "user", "content": "Hello"}])
+```
+
+```yaml
+openai_api:
+    enabled: true          # false -> every /v1 route returns 404
+    api_keys:              # empty/missing -> /v1 accepts any request
+        - "sk-local-1"
+```
+
+- **Same adapter features:** `custom_name`, IP routing, system prompts (`system_prompt_mode`), prompt caching, tracing, `remove_thinking_tags` (streaming too), and the `debug` keyword.
+- **Parameters:** everything the client sends (`tools`, `temperature`, `response_format`, images, ...) is forwarded; model `params` from the config override client values. Client-side credentials and LiteLLM control keys sent by a client are dropped (`api_key`, `api_base`, `base_url`, `api_version`, `custom_llm_provider`, `extra_headers`, `headers`, `litellm_params` and common provider auth params such as `vertex_project` or `aws_access_key_id`; the list is not exhaustive). A config `max_tokens` does not cap a client-sent `max_completion_tokens` — set both in `params` if you need a hard limit.
+- **Responses:** upstream fields are passed through unchanged (`tool_calls`, `reasoning_content`, `logprobs`, ...); only `model` is replaced with the name the client requested. Streaming uses SSE; the usage chunk is sent only when the client asks for `stream_options.include_usage`.
+- **Errors:** real HTTP status codes with the OpenAI error body `{"error": {"message", "type", "param", "code"}}`. Upstream errors keep their status and body (including 401/403 from the upstream provider). `error_handling` (the `[LLM ERROR]` text) applies only to the Ollama endpoints.
+- **`/v1/completions`** runs through chat completions: `prompt` must be a single string; `echo`, `suffix` (fill-in-the-middle), `logprobs` and `best_of > 1` return HTTP 400.
+- `GET /v1/models` keeps upstream error statuses (e.g. 429 with `retry-after`); an empty filtered model list is returned as `{"object": "list", "data": []}`.
+- Authentication applies to `/v1` only — Ollama endpoints stay open. Without `api_keys` (including configs that have no `openai_api` section at all) a warning is logged at startup and on every config reload. Set `api_keys` whenever the port is reachable beyond localhost (the `debug` keyword reveals compiled system prompts).
+- Not implemented: `/v1/responses`, `/v1/embeddings`.
+
 ### Tracing (LiteLLM Integration)
 
 ```yaml
@@ -245,6 +278,15 @@ The service starts on `http://localhost:11434` by default (or `http://localhost:
 | `/health`       | GET      | Health check with OpenAI connectivity      |
 | `/`             | GET      | Service info                               |
 
+OpenAI-compatible endpoints (see [OpenAI-compatible API](#openai-compatible-api-v1)):
+
+| Endpoint               | Method | Description                                         |
+|------------------------|--------|-----------------------------------------------------|
+| `/v1/chat/completions` | POST   | Chat completions (SSE streaming/non-streaming)      |
+| `/v1/completions`      | POST   | Legacy text completions (via chat completions)      |
+| `/v1/models`           | GET    | List models                                         |
+| `/v1/models/{id}`      | GET    | Retrieve a model (ids may contain `/`)              |
+
 ## Usage Examples
 
 ```bash
@@ -278,6 +320,16 @@ curl -X POST http://localhost:11434/api/generate \
     "stream": false
   }'
 
+# OpenAI-compatible chat (streaming)
+curl -N -X POST http://localhost:11434/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "GPT-4o Mini",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": true
+  }'
+
 # Embeddings
 curl -X POST http://localhost:11434/api/embed \
   -H "Content-Type: application/json" \
@@ -297,13 +349,19 @@ ollama_adapter/
   config.py            # Config loading, validation, hot-reload
   logging_utils.py     # Request validation, logging, @log_endpoint decorator
   tracing.py           # LiteLLM tracing integration
-  thinking.py          # <think>/<thinking> tag removal (regex + streaming state machine)
+  thinking.py          # <think>/<thinking> tag removal (regex + ThinkingTagFilter for streams)
   prompt_renderer.py   # Jinja2 sandboxed environment + PromptRenderError
+  error_formatter.py   # Runtime errors -> "[LLM ERROR]" assistant text (Ollama endpoints)
+  debug_prompt.py      # "debug" keyword: compiled prompt output
   models.py            # Model resolution, caching, IP routing, system prompts
-  routes.py            # Flask Blueprint with all API endpoints
+  completion.py        # Shared upstream pipeline (param merge, prompts, headers, upstream call)
+  routes.py            # Flask Blueprint with the Ollama API endpoints
+  openai_routes.py     # Flask Blueprint with the OpenAI-compatible /v1 endpoints
+  openai_translate.py  # /v1 payload/chunk transforms and SSE framing
+  openai_errors.py     # /v1 exception -> HTTP status + OpenAI error body
   app.py               # Flask app factory
 ```
 
 ## Testing
 
-Manual test cases are available in `tests/manual-check.http`.
+Automated tests: `make check` (format, lint, mypy, pytest). Manual test cases are available in `tests/manual-check.http`.

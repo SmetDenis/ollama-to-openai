@@ -6,6 +6,9 @@ from flask import Flask, Response, g, jsonify, request
 
 from ollama_adapter import state
 from ollama_adapter.config import check_and_reload_config, init_state
+from ollama_adapter.openai_errors import error_response
+from ollama_adapter.openai_routes import bp as openai_bp
+from ollama_adapter.openai_routes import is_v1_path
 from ollama_adapter.routes import bp
 
 
@@ -40,9 +43,12 @@ def create_app(config_path: str = "config.yml") -> Flask:
         g.litellm_response_headers = {}
 
     app.register_blueprint(bp)
+    app.register_blueprint(openai_bp)
 
     @app.errorhandler(Exception)
-    def _handle_unhandled_exception(e: Exception) -> tuple[Response, int]:  # noqa: ARG001
+    def _handle_unhandled_exception(e: Exception) -> tuple[Response, int]:
+        if is_v1_path(request.path):
+            return error_response(e)
         state.logger.exception("Unhandled exception")
         return jsonify({"error": "Internal server error"}), 500
 
