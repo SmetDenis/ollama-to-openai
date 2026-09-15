@@ -155,28 +155,84 @@ def _resolve_system_prompt(adapter_params: dict[str, Any], model_id: str) -> str
     return stripped or None
 
 
-def place_system_message(messages: list[dict[str, Any]], content: str) -> list[dict[str, Any]]:
-    """Return a new list with a system message of `content` placed correctly.
+SYSTEM_PROMPT_MODES = ("replace", "prepend", "append")
+_INSTRUCTION_ROLES = ("system", "developer")
+_SYSTEM_JOINER = "\n\n"
 
-    Replaces the first existing system message; otherwise inserts at index 0.
-    Does not mutate the input list.
+
+def _is_instruction_message(msg: Any) -> bool:
+    """Return True for a `system` or `developer` message (OpenAI treats them alike)."""
+    return isinstance(msg, dict) and msg.get("role") in _INSTRUCTION_ROLES
+
+
+def merge_system_content(client_content: Any, config_content: str, mode: str) -> Any:
+    """Combine a client's system message content with the rendered config prompt.
+
+    `replace` (or a missing/blank client content) yields `config_content`. `prepend` /
+    `append` join strings with a blank line, or insert a text part into a content-part list.
+    Unsupported content types fall back to `replace` with a warning.
+    """
+    if mode not in ("prepend", "append"):
+        return config_content
+    if client_content is None or (isinstance(client_content, str | list) and not client_content):
+        return config_content
+    if isinstance(client_content, str):
+        if not client_content.strip():
+            return config_content
+        parts = [config_content, client_content] if mode == "prepend" else [client_content, config_content]
+        return _SYSTEM_JOINER.join(parts)
+    if isinstance(client_content, list):
+        text_part = {"type": "text", "text": config_content}
+        return [text_part, *client_content] if mode == "prepend" else [*client_content, text_part]
+    state.logger.warning(
+        "Unsupported system message content type %s; system_prompt_mode '%s' falls back to replace",
+        type(client_content).__name__,
+        mode,
+    )
+    return config_content
+
+
+def place_system_message(
+    messages: list[dict[str, Any]], content: str, *, mode: str = "replace"
+) -> list[dict[str, Any]]:
+    """Return a new list with the config system prompt `content` placed correctly.
+
+    Targets the first `system` or `developer` message: `replace` swaps its content,
+    `prepend`/`append` merge with it (other keys and the role are kept). Without such a
+    message a `system` message is inserted at index 0. Does not mutate the input list.
     """
     result = list(messages)
-    system_msg = {"role": "system", "content": content}
 
     for i, msg in enumerate(result):
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            result[i] = system_msg
+        if _is_instruction_message(msg):
+            if mode == "replace":
+                result[i] = {"role": msg["role"], "content": content}
+            else:
+                result[i] = {**msg, "content": merge_system_content(msg.get("content"), content, mode)}
             return result
 
-    result.insert(0, system_msg)
+    result.insert(0, {"role": "system", "content": content})
     return result
 
 
+def _has_content(content: Any) -> bool:
+    """Return True for non-blank string content or a non-empty content-part list."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    return bool(content)
+
+
 def apply_system_prompt(
-    messages: list[dict[str, Any]], adapter_params: dict[str, Any], model_id: str
+    messages: list[dict[str, Any]],
+    adapter_params: dict[str, Any],
+    model_id: str,
+    *,
+    warn_on_replace: bool = False,
 ) -> list[dict[str, Any]]:
     """Apply rendered system prompt from model config to the messages list.
+
+    With `warn_on_replace` (OpenAI-compatible clients such as IDE agents), a WARNING is
+    logged when `replace` mode discards a non-empty client system/developer message.
 
     Raises `PromptRenderError` on rendering failure; callers translate it into
     a client-facing assistant message.
@@ -185,15 +241,48 @@ def apply_system_prompt(
     if not resolved:
         return messages
 
-    had_system = any(isinstance(m, dict) and m.get("role") == "system" for m in messages)
-    result = place_system_message(messages, resolved)
+    mode = adapter_params.get("system_prompt_mode") or "replace"
+    client_instruction = next((m for m in messages if _is_instruction_message(m)), None)
+    had_system = client_instruction is not None
+    if (
+        warn_on_replace
+        and mode == "replace"
+        and client_instruction is not None
+        and _has_content(client_instruction.get("content"))
+    ):
+        state.logger.warning(
+            "Model '%s': system_prompt_mode=replace discarded the client's %s message; "
+            "set system_prompt_mode: prepend (or append) to keep client instructions such as agent tool rules",
+            model_id,
+            client_instruction.get("role"),
+        )
+    result = place_system_message(messages, resolved, mode=mode)
 
     if had_system:
-        state.logger.debug("Replaced system message for model '%s' with config system_prompt", model_id)
+        state.logger.debug(
+            "Applied config system_prompt to existing system message for model '%s' (mode=%s)", model_id, mode
+        )
     else:
         state.logger.debug("Prepended system message for model '%s' from config system_prompt", model_id)
 
     return result
+
+
+def _cache_marked_content(content: Any) -> Any:
+    """Return content with an ephemeral `cache_control` marker, or None if not applicable."""
+    marker = {"type": "ephemeral"}
+    if isinstance(content, str):
+        return [{"type": "text", "text": content, "cache_control": marker}] if content else None
+    if not isinstance(content, list):
+        return None
+    parts = [p for p in content if isinstance(p, dict)]
+    if len(parts) != len(content) or any("cache_control" in p for p in parts):
+        return None
+    text_indexes = [i for i, p in enumerate(parts) if p.get("type") == "text"]
+    if not text_indexes:
+        return None
+    last = text_indexes[-1]
+    return [{**p, "cache_control": marker} if i == last else p for i, p in enumerate(parts)]
 
 
 def apply_prompt_caching(
@@ -201,7 +290,8 @@ def apply_prompt_caching(
 ) -> list[dict[str, Any]]:
     """Add cache_control markers to system message content for provider-side prompt caching.
 
-    Enable prompt caching on Anthropic and Google Gemini via LiteLLM.
+    Enable prompt caching on Anthropic and Google Gemini via LiteLLM. String content becomes a
+    single cached text part; content-part lists get the marker on their last text part.
     """
     if not adapter_params.get("prompt_caching"):
         return messages
@@ -209,21 +299,29 @@ def apply_prompt_caching(
     result = list(messages)
 
     for i, msg in enumerate(result):
-        if not isinstance(msg, dict) or msg.get("role") != "system":
+        if not _is_instruction_message(msg):
             continue
 
-        content = msg.get("content")
-        if not content or not isinstance(content, str):
+        marked = _cache_marked_content(msg.get("content"))
+        if marked is None:
             continue
 
-        result[i] = {
-            "role": "system",
-            "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
-        }
-        state.logger.debug("Added cache_control to system message for model '%s' (%d chars)", model_id, len(content))
+        result[i] = {**msg, "content": marked}
+        state.logger.debug("Added cache_control to system message for model '%s'", model_id)
         break
 
     return result
+
+
+def is_model_allowed(model_id: str) -> bool:
+    """Return True when `model_id` may be used: any model if `models` is empty, else only listed ones.
+
+    Both `custom_name` and the original `name` of a configured entry are accepted.
+    """
+    models_config = state.CONFIG.get("models") or []
+    if not models_config:
+        return True
+    return _find_model_entry(models_config, model_id, resolve_model_name(model_id)) is not None
 
 
 def get_display_name(original_name: str) -> str:
@@ -249,8 +347,13 @@ def resolve_model_name(client_name: str) -> str:
     return client_name
 
 
-def get_and_cache_models(*, force_refresh: bool = False) -> list[dict[str, Any]]:
-    """Fetch, filter, map and cache model list from OpenAI API."""
+def get_and_cache_models(*, force_refresh: bool = False, raise_errors: bool = False) -> list[dict[str, Any]]:
+    """Fetch, filter, map and cache model list from OpenAI API.
+
+    By default upstream failures are logged and reported as an empty list (or the previous
+    cache on refresh). With `raise_errors`, the upstream exception propagates so callers can
+    distinguish a failure from a legitimately empty model list.
+    """
     if state.CACHED_MODELS and not force_refresh:
         return state.CACHED_MODELS
 
@@ -261,8 +364,10 @@ def get_and_cache_models(*, force_refresh: bool = False) -> list[dict[str, Any]]
         all_models_response = state.client.models.list().data
         models_config = state.CONFIG.get("models", [])
         new_models = _build_model_list(all_models_response, models_config)
-    except Exception:  # noqa: BLE001
+    except Exception:
         state.logger.exception("Critical error getting models from OpenAI")
+        if raise_errors:
+            raise
         if force_refresh:
             state.logger.warning("Keeping previous model cache after refresh failure")
             return state.CACHED_MODELS
@@ -351,7 +456,14 @@ def apply_ip_routing(model_entry: dict[str, Any], client_ip: str) -> dict[str, A
     merged = dict(model_entry)
     merged.pop("ip_routing", None)
 
-    for key in ("name", "system_prompt_inline", "system_prompt_file", "remove_thinking_tags", "prompt_caching"):
+    for key in (
+        "name",
+        "system_prompt_inline",
+        "system_prompt_file",
+        "system_prompt_mode",
+        "remove_thinking_tags",
+        "prompt_caching",
+    ):
         if key in matching_rule:
             merged[key] = matching_rule[key]
 
@@ -396,6 +508,7 @@ def get_model_config(
         "remove_thinking_tags",
         "system_prompt_inline",
         "system_prompt_file",
+        "system_prompt_mode",
         "prompt_caching",
         "prompt_vars",
     ):

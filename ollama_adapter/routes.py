@@ -10,13 +10,17 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from ollama_adapter import state
-from ollama_adapter.debug_prompt import (
-    build_config_view,
-    build_debug_content,
-    build_outgoing_view,
-    is_debug_trigger,
-    last_user_text,
+from ollama_adapter.completion import (
+    ResolvedModel,
+    UpstreamRequest,
+    build_debug_text,
+    build_extra_body,
+    build_upstream_request,
+    open_chat_completion,
+    prepare_messages,
+    resolve_model,
 )
+from ollama_adapter.debug_prompt import is_debug_trigger, last_user_text
 from ollama_adapter.error_formatter import format_error_text
 from ollama_adapter.error_formatter import is_enabled as error_handling_enabled
 from ollama_adapter.logging_utils import (
@@ -26,17 +30,16 @@ from ollama_adapter.logging_utils import (
     validate_model_parameter,
 )
 from ollama_adapter.models import (
-    apply_prompt_caching,
-    apply_system_prompt,
     create_final_response,
     get_and_cache_models,
     get_model_config,
+    is_model_allowed,
     resolve_model_name,
 )
+from ollama_adapter.openai_routes import openai_api_enabled
 from ollama_adapter.prompt_renderer import PromptRenderError
 from ollama_adapter.thinking import StreamContext, process_stream, remove_thinking_tags
 from ollama_adapter.tracing import (
-    build_trace_body_metadata,
     build_trace_headers,
     capture_litellm_headers,
     log_litellm_headers,
@@ -52,7 +55,6 @@ class _CompletionContext:
 
     model_id: str
     display_name: str
-    original_name: str
     messages: list[dict[str, Any]]
     start_time: float
 
@@ -94,27 +96,6 @@ def _yield_runtime_error_chunks(
     yield json.dumps(final_payload) + "\n"
 
 
-def _build_api_params(ctx: _CompletionContext, openai_params: dict[str, Any], *, streaming: bool) -> dict[str, Any]:
-    """Assemble the OpenAI Chat Completions API parameters."""
-    api_params: dict[str, Any] = {
-        "model": openai_params.get("model_id", ctx.original_name),
-        "messages": ctx.messages,
-        "stream": streaming,
-    }
-    if streaming:
-        api_params["stream_options"] = {"include_usage": True}
-    return api_params
-
-
-def _build_extra_body(openai_params: dict[str, Any], ctx: _CompletionContext) -> dict[str, Any]:
-    """Build the OpenAI `extra_body` dict, including trace metadata if configured."""
-    extra_body = {k: v for k, v in openai_params.items() if k != "model_id"}
-    trace_meta = build_trace_body_metadata(ctx.display_name)
-    if trace_meta:
-        extra_body["metadata"] = trace_meta
-    return extra_body
-
-
 def _yield_prompt_error_chunks(
     ctx: _CompletionContext,
     response_key: str,
@@ -132,6 +113,20 @@ def _yield_prompt_error_chunks(
     yield json.dumps(final_error) + "\n"
 
 
+def _ollama_upstream_request(
+    ctx: _CompletionContext, resolved: ResolvedModel, messages: list[dict[str, Any]], *, streaming: bool
+) -> UpstreamRequest:
+    """Assemble the upstream request for the Ollama endpoints (config params only, no client params)."""
+    return build_upstream_request(
+        display_name=ctx.display_name,
+        resolved=resolved,
+        messages=messages,
+        stream=streaming,
+        extra_body=build_extra_body(resolved.openai_params, ctx.display_name),
+        stream_options={"include_usage": True} if streaming else None,
+    )
+
+
 def _call_openai_streaming(
     ctx: _CompletionContext,
     make_chunk: Callable[[str, str], dict[str, Any]],
@@ -141,45 +136,26 @@ def _call_openai_streaming(
     client_ip = get_client_ip()
 
     def generate_stream() -> Generator[str]:
-        assert state.client is not None  # noqa: S101
-        raw_ctx = None
         try:
-            openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
-            api_params = _build_api_params(ctx, openai_params, streaming=True)
-            extra_body = _build_extra_body(openai_params, ctx)
-
+            resolved = resolve_model(ctx.model_id, client_ip)
             try:
-                api_params["messages"] = apply_system_prompt(api_params["messages"], adapter_params, ctx.model_id)
+                messages = prepare_messages(ctx.messages, resolved.adapter_params, ctx.model_id)
             except PromptRenderError as exc:
                 state.logger.error("Prompt render failed (model=%s): %s", ctx.model_id, exc, exc_info=True)
                 yield from _yield_prompt_error_chunks(ctx, response_key, make_chunk, exc)
                 return
-            api_params["messages"] = apply_prompt_caching(api_params["messages"], adapter_params, ctx.model_id)
 
-            merged_headers = build_trace_headers(extra_headers, ctx.display_name) or None
-
-            if tracing_log_headers_enabled():
-                raw_ctx = state.client.chat.completions.with_streaming_response.create(
-                    **api_params, extra_body=extra_body or None, extra_headers=merged_headers
-                )
-                raw_response = raw_ctx.__enter__()
-                capture_litellm_headers(raw_response.headers)
-                log_litellm_headers()
-                response_stream = raw_response.parse()
-            else:
-                response_stream = state.client.chat.completions.create(
-                    **api_params, extra_body=extra_body or None, extra_headers=merged_headers
-                )
-
+            req = _ollama_upstream_request(ctx, resolved, messages, streaming=True)
             stream_ctx = StreamContext(
                 model_id=ctx.model_id,
                 display_name=ctx.display_name,
                 make_chunk=make_chunk,
-                remove_tags=adapter_params.get("remove_thinking_tags", False),
+                remove_tags=resolved.adapter_params.get("remove_thinking_tags", False),
             )
             usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
 
-            yield from process_stream(response_stream, stream_ctx, usage)
+            with open_chat_completion(req) as response_stream:
+                yield from process_stream(response_stream, stream_ctx, usage)
 
             duration_ns = int((time.time() - ctx.start_time) * 1e9)
             final_response = create_final_response(
@@ -199,59 +175,38 @@ def _call_openai_streaming(
                 yield from _yield_runtime_error_chunks(ctx, response_key, make_chunk, format_error_text(e))
             else:
                 yield json.dumps({"error": f"Streaming error: {e!s}"}) + "\n"
-        finally:
-            if raw_ctx is not None:
-                raw_ctx.__exit__(None, None, None)
 
     return Response(stream_with_context(generate_stream()), mimetype="application/x-ndjson")
 
 
 def _call_openai_non_streaming(ctx: _CompletionContext, response_key: str) -> Response | tuple[Response, int]:
     """Execute a non-streaming completion call shared by chat() and generate()."""
-    assert state.client is not None  # noqa: S101
-    client_ip = get_client_ip()
-    openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
-
-    api_params = _build_api_params(ctx, openai_params, streaming=False)
-    extra_body = _build_extra_body(openai_params, ctx)
+    resolved = resolve_model(ctx.model_id, get_client_ip())
 
     try:
-        api_params["messages"] = apply_system_prompt(api_params["messages"], adapter_params, ctx.model_id)
+        messages = prepare_messages(ctx.messages, resolved.adapter_params, ctx.model_id)
     except PromptRenderError as exc:
         state.logger.error("Prompt render failed (model=%s): %s", ctx.model_id, exc, exc_info=True)
         return jsonify(_build_prompt_error_payload(ctx, response_key, str(exc)))
-    api_params["messages"] = apply_prompt_caching(api_params["messages"], adapter_params, ctx.model_id)
 
-    merged_headers = build_trace_headers(extra_headers, ctx.display_name) or None
+    req = _ollama_upstream_request(ctx, resolved, messages, streaming=False)
+    with open_chat_completion(req) as response:
+        duration_ns = int((time.time() - ctx.start_time) * 1e9)
 
-    if tracing_log_headers_enabled():
-        raw = state.client.chat.completions.with_raw_response.create(
-            **api_params, extra_body=extra_body or None, extra_headers=merged_headers
+        if not response.choices:
+            if error_handling_enabled():
+                error_text = format_error_text(RuntimeError("No response choices returned from upstream"))
+                return jsonify(_build_runtime_error_payload(ctx.display_name, response_key, error_text))
+            return jsonify({"error": "No response choices returned from OpenAI"}), 500
+
+        final_response = create_final_response(
+            ctx.display_name, response.usage.prompt_tokens, response.usage.completion_tokens, duration_ns
         )
-        response = raw.parse()
-        capture_litellm_headers(raw.headers)
-        log_litellm_headers()
-    else:
-        response = state.client.chat.completions.create(
-            **api_params, extra_body=extra_body or None, extra_headers=merged_headers
+
+        raw_content = response.choices[0].message.content
+        cleaned_content = remove_thinking_tags(
+            raw_content, ctx.model_id, remove_enabled=resolved.adapter_params.get("remove_thinking_tags", False)
         )
-
-    duration_ns = int((time.time() - ctx.start_time) * 1e9)
-
-    if not response.choices:
-        if error_handling_enabled():
-            error_text = format_error_text(RuntimeError("No response choices returned from upstream"))
-            return jsonify(_build_runtime_error_payload(ctx.display_name, response_key, error_text))
-        return jsonify({"error": "No response choices returned from OpenAI"}), 500
-
-    final_response = create_final_response(
-        ctx.display_name, response.usage.prompt_tokens, response.usage.completion_tokens, duration_ns
-    )
-
-    raw_content = response.choices[0].message.content
-    cleaned_content = remove_thinking_tags(
-        raw_content, ctx.model_id, remove_enabled=adapter_params.get("remove_thinking_tags", False)
-    )
 
     if response_key == "message":
         final_response["message"] = {"role": "assistant", "content": cleaned_content}
@@ -298,18 +253,14 @@ def _debug_response(
     streaming: bool,
 ) -> Response:
     """Return the compiled-prompt debug output without calling the upstream model."""
-    client_ip = get_client_ip()
-    openai_params, adapter_params, extra_headers = get_model_config(ctx.model_id, client_ip=client_ip)
-
+    resolved = resolve_model(ctx.model_id, get_client_ip())
     # Mirror the real call: same helpers assemble what actually goes upstream.
-    extra_body = _build_extra_body(openai_params, ctx)
-    merged_headers = build_trace_headers(extra_headers, ctx.display_name)
-
-    config_view = build_config_view(ctx.model_id, openai_params, adapter_params, extra_headers)
-    outgoing_view = build_outgoing_view(openai_params, extra_body, merged_headers)
-
-    content = build_debug_content(
-        ctx.messages, adapter_params, ctx.model_id, config_view=config_view, outgoing_view=outgoing_view
+    content = build_debug_text(
+        model_id=ctx.model_id,
+        display_name=ctx.display_name,
+        messages=ctx.messages,
+        resolved=resolved,
+        extra_body=build_extra_body(resolved.openai_params, ctx.display_name),
     )
     if streaming:
         return Response(
@@ -317,6 +268,16 @@ def _debug_response(
             mimetype="application/x-ndjson",
         )
     return jsonify(_build_debug_payload(ctx, response_key, content))
+
+
+def _validate_allowed_model(data: dict[str, Any]) -> str | tuple[Response, int]:
+    """Validate the model parameter and reject models missing from a non-empty `models` list (404)."""
+    result = validate_model_parameter(data)
+    if isinstance(result, tuple):
+        return result
+    if not is_model_allowed(result):
+        return jsonify({"error": f'model "{result}" not found'}), 404
+    return result
 
 
 @bp.route("/api/tags", methods=["GET", "POST"])
@@ -363,7 +324,7 @@ def show_model() -> Response | tuple[Response, int]:
         return result
     data = result
 
-    model_result = validate_model_parameter(data)
+    model_result = _validate_allowed_model(data)
     if isinstance(model_result, tuple):
         return model_result
     model_id = model_result
@@ -431,13 +392,11 @@ def chat() -> Response | tuple[Response, int]:  # noqa: PLR0911
             return result
         data = result
 
-        model_result = validate_model_parameter(data)
+        model_result = _validate_allowed_model(data)
         if isinstance(model_result, tuple):
             return model_result
         model_id = model_result
         display_name_for_error = model_id
-
-        original_name = resolve_model_name(model_id)
 
         messages = data.get("messages")
         if not isinstance(messages, list) or not messages:
@@ -446,7 +405,6 @@ def chat() -> Response | tuple[Response, int]:  # noqa: PLR0911
         ctx = _CompletionContext(
             model_id=model_id,
             display_name=model_id,
-            original_name=original_name,
             messages=messages,
             start_time=start_time,
         )
@@ -487,13 +445,11 @@ def generate() -> Response | tuple[Response, int]:  # noqa: PLR0911
             return result
         data = result
 
-        model_result = validate_model_parameter(data)
+        model_result = _validate_allowed_model(data)
         if isinstance(model_result, tuple):
             return model_result
         model_id = model_result
         display_name_for_error = model_id
-
-        original_name = resolve_model_name(model_id)
 
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
@@ -508,7 +464,6 @@ def generate() -> Response | tuple[Response, int]:  # noqa: PLR0911
         ctx = _CompletionContext(
             model_id=model_id,
             display_name=model_id,
-            original_name=original_name,
             messages=messages,
             start_time=start_time,
         )
@@ -561,7 +516,7 @@ def embed() -> Response | tuple[Response, int]:
             return result
         data = result
 
-        model_result = validate_model_parameter(data)
+        model_result = _validate_allowed_model(data)
         if isinstance(model_result, tuple):
             return model_result
         model = model_result
@@ -649,19 +604,16 @@ def health_check() -> tuple[Response, int]:
 @log_endpoint
 def root() -> Response:
     """Return basic service information."""
-    return jsonify(
-        {
-            "service": "Ollama to OpenAI Adapter",
-            "version": "0.1.0",
-            "endpoints": [
-                "/api/tags",
-                "/api/show",
-                "/api/chat",
-                "/api/generate",
-                "/api/embed",
-                "/api/version",
-                "/api/ps",
-                "/health",
-            ],
-        }
-    )
+    endpoints = [
+        "/api/tags",
+        "/api/show",
+        "/api/chat",
+        "/api/generate",
+        "/api/embed",
+        "/api/version",
+        "/api/ps",
+        "/health",
+    ]
+    if openai_api_enabled():
+        endpoints += ["/v1/models", "/v1/chat/completions", "/v1/completions"]
+    return jsonify({"service": "Ollama to OpenAI Adapter", "version": "0.1.0", "endpoints": endpoints})

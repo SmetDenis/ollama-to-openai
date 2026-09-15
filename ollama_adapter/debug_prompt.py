@@ -10,7 +10,12 @@ import re
 from typing import Any
 
 from ollama_adapter import state
-from ollama_adapter.models import _collect_prompt_vars, _select_prompt_source, place_system_message
+from ollama_adapter.models import (
+    _collect_prompt_vars,
+    _is_instruction_message,
+    _select_prompt_source,
+    place_system_message,
+)
 from ollama_adapter.prompt_renderer import PromptRenderError, render_file_debug, render_inline_debug
 
 _TAG_RE = re.compile(r"<[^>]*>")
@@ -134,15 +139,27 @@ def is_debug_trigger(text: Any) -> bool:
     return _strip_tags(text).strip().lower() == _DEBUG_KEYWORD
 
 
-def last_user_text(messages: list[dict[str, Any]]) -> str | None:
-    """Return the last message's string content iff it is a user message; else None."""
+def last_user_text(messages: list[dict[str, Any]], *, include_parts: bool = False) -> str | None:
+    """Return the last message's text iff it is a user message; else None.
+
+    By default only string content counts. With `include_parts`, a content-part list
+    yields its `text` parts joined by newlines (None when it has no text parts).
+    """
     if not messages:
         return None
     last = messages[-1]
-    if isinstance(last, dict) and last.get("role") == "user":
-        content = last.get("content")
-        if isinstance(content, str):
-            return content
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return None
+    content = last.get("content")
+    if isinstance(content, str):
+        return content
+    if include_parts and isinstance(content, list):
+        texts = [
+            p["text"]
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+        ]
+        return "\n".join(texts) if texts else None
     return None
 
 
@@ -171,6 +188,22 @@ def _render_system_with_markers(adapter_params: dict[str, Any], model_id: str) -
         return f"── PROMPT RENDER ERROR: {exc} ──", False
 
 
+_DATA_URL_RE = re.compile(r"^data:([^;,]*)(;base64)?,")
+_DATA_URL_KEEP = 128
+
+
+def _shorten_data_urls(obj: Any) -> Any:
+    """Return a copy of `obj` with long inline `data:` URLs (e.g. base64 images) abbreviated."""
+    if isinstance(obj, dict):
+        return {k: _shorten_data_urls(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_shorten_data_urls(v) for v in obj]
+    if isinstance(obj, str) and len(obj) > _DATA_URL_KEEP and (match := _DATA_URL_RE.match(obj)):
+        omitted = len(obj) - match.end()
+        return f"{match.group(0)}<{omitted} chars omitted>"
+    return obj
+
+
 def _format_messages(messages: list[dict[str, Any]]) -> str:
     """Render the messages array as role-labelled sections; non-string content as JSON."""
     sections: list[str] = []
@@ -178,7 +211,7 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
         role = msg.get("role", "?") if isinstance(msg, dict) else "?"
         content = msg.get("content") if isinstance(msg, dict) else msg
         if not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False, indent=2)
+            content = json.dumps(_shorten_data_urls(content), ensure_ascii=False, indent=2)
         sections.append(f"═══ message[{i}] role={role} ═══\n{content}")
     return "\n\n".join(sections)
 
@@ -214,10 +247,16 @@ def build_debug_content(
 
     rendered_system, rendered_ok = _render_system_with_markers(adapter_params, model_id)
     if rendered_system is not None:
+        mode = adapter_params.get("system_prompt_mode") or "replace"
         if rendered_ok and adapter_params.get("prompt_caching"):
             note = "── note: prompt_caching enabled (sent as cache_control text block) ──"
             rendered_system = f"{note}\n{rendered_system}"
-        final_messages = place_system_message(messages, rendered_system)
+        has_client_system = any(_is_instruction_message(m) for m in messages)
+        if mode != "replace" and has_client_system:
+            rendered_system = (
+                f"── note: system_prompt_mode={mode} (merged with client system message) ──\n{rendered_system}"
+            )
+        final_messages = place_system_message(messages, rendered_system, mode=mode)
     else:
         final_messages = messages
     sections.append(_format_messages(final_messages))

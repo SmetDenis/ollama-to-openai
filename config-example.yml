@@ -64,8 +64,28 @@ logging:
 #
 # Debug: send the single word "debug" (any case; markup such as the Raycast
 # <user_input>...</user_input> envelope is stripped first) as the chat/generate
-# input to receive the fully compiled prompt + messages array (with include
-# markers) instead of a model response. Always on; not configurable.
+# input (or the last user message / prompt on /v1) to receive the fully compiled
+# prompt + messages array (with include markers) instead of a model response.
+# Always on; not configurable.
+
+# OpenAI-compatible API (optional)
+# Exposes /v1/chat/completions, /v1/completions, /v1/models and /v1/models/{id} on the
+# same port (like real Ollama). Clients point their OpenAI SDK at http://<host>:<port>/v1.
+# - Client parameters (tools, temperature, response_format, images, ...) are forwarded;
+#   model `params` below override them. Client-sent api_key/api_base/base_url/api_version
+#   are dropped.
+# - Upstream fields (tool_calls, reasoning_content, logprobs, ...) pass through unchanged;
+#   `model` in responses is the name the client requested.
+# - Errors use real HTTP status codes and the OpenAI error body (not `error_handling`).
+# - /v1/completions runs via chat completions; echo, suffix (FIM), logprobs and
+#   best_of > 1 are rejected with HTTP 400.
+# - api_keys protects /v1 only (Ollama endpoints stay open). Set it whenever the port is
+#   reachable beyond localhost: the `debug` keyword reveals compiled system prompts.
+# Without this section /v1 is enabled WITHOUT authentication (a warning is logged).
+# openai_api:
+#   enabled: true            # false -> every /v1 path and method returns 404 (default: true)
+#   api_keys:                # Bearer tokens accepted on /v1; empty/missing -> no auth
+#     - "sk-local-change-me"
 
 # Runtime error handling (optional)
 # Controls how /api/chat and /api/generate respond when the upstream LLM provider
@@ -75,7 +95,8 @@ logging:
 # with the configured `prefix` and a short category. Clients (e.g. Raycast) see a
 # readable explanation instead of an HTTP 500 or a half-finished stream.
 # Affects only /api/chat and /api/generate. /api/tags, /api/embed, /api/show, /health
-# keep their HTTP semantics.
+# keep their HTTP semantics, and the OpenAI-compatible /v1 endpoints always answer with
+# real HTTP status codes.
 # error_handling:
 #   enabled: true            # set to false to restore legacy HTTP 500 / inline error body
 #   show_details: true       # include the exception message (false → only the category name)
@@ -100,7 +121,9 @@ logging:
 
 # Model configurations (optional)
 # If empty, all OpenAI models will be available with default settings
-# If specified, only these models will be exposed through the adapter
+# If specified, only these models can be used: any other model name gets HTTP 404 on
+# /api/chat, /api/generate, /api/embed, /api/show and /v1/chat/completions, /v1/completions.
+# List embedding models here too if you use /api/embed.
 #
 # Each model entry has two levels:
 #   Root level (proxy settings):
@@ -116,7 +139,13 @@ logging:
 #       Path is RELATIVE to prompts.base_dir; absolute paths and `..` are rejected
 #       File is rendered with Jinja2 on every request (hot-reload, supports includes)
 #       If both fields are set, the file takes precedence and a warning is logged
-#       Either form overrides any system message in client requests
+#     - system_prompt_mode (optional): How the config prompt combines with the client's own
+#       system message (the first "system" or "developer" message):
+#         replace (default) - the config prompt replaces it
+#         prepend / append  - the config prompt is joined before / after it (use for IDE
+#                             agents whose system message carries tool instructions)
+#       Without a client system message the config prompt is inserted first in every mode
+#       On /v1 a WARNING is logged whenever replace discards a non-empty client message
 #       Note: the legacy `system_prompt` key is deprecated and ignored (logs a warning)
 #     - prompt_vars (optional): Dict of variables passed to the Jinja2 template
 #       Merged on top of global prompts.vars (model overrides global, per-key)
@@ -126,7 +155,7 @@ logging:
 #   ip_routing (optional): List of IP-specific overrides for this model
 #     Each entry has 'ip' (client alias from 'clients' section or direct IP) plus
 #     optional overrides: name, params, headers, system_prompt_inline, system_prompt_file,
-#     remove_thinking_tags, prompt_caching, prompt_vars
+#     system_prompt_mode, remove_thinking_tags, prompt_caching, prompt_vars
 #     Unspecified fields inherit from the parent model entry
 #     Dict fields (params, headers, prompt_vars) are shallow-merged with parent values
 models:

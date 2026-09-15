@@ -4,9 +4,11 @@ import json
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 import yaml
 from flask import Flask
+from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 from ollama_adapter import state
 from ollama_adapter.prompt_renderer import init_jinja_env
@@ -176,3 +178,42 @@ def collect_stream(response) -> list[dict[str, Any]]:
     """Parse ndjson from a Flask test response into a list of dicts."""
     lines = response.data.decode("utf-8").strip().split("\n")
     return [json.loads(line) for line in lines if line.strip()]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible (/v1) helpers
+# ---------------------------------------------------------------------------
+
+
+def make_status_error(cls, status: int, body: Any, headers: dict[str, str] | None = None):
+    """Build a real OpenAI SDK APIStatusError subclass instance."""
+    request = httpx.Request("POST", "http://upstream/v1/chat/completions")
+    response = httpx.Response(status, headers=headers or {}, request=request)
+    return cls(f"Error code: {status} - {body}", response=response, body=body)
+
+
+def make_sdk_chunk(data: dict[str, Any]) -> ChatCompletionChunk:
+    """Build a real SDK chat.completion.chunk object from a dict."""
+    return _construct(ChatCompletionChunk, data)
+
+
+def make_sdk_completion(data: dict[str, Any]) -> ChatCompletion:
+    """Build a real SDK chat.completion object from a dict."""
+    return _construct(ChatCompletion, data)
+
+
+def _construct(model_cls, data):
+    from openai._models import construct_type
+
+    return construct_type(type_=model_cls, value=data)
+
+
+def collect_sse(response) -> list[Any]:
+    """Parse an SSE body into a list of JSON payloads; the terminator is kept as the string "[DONE]"."""
+    events: list[Any] = []
+    for line in response.get_data(as_text=True).split("\n"):
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        events.append(payload if payload == "[DONE]" else json.loads(payload))
+    return events

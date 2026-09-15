@@ -13,6 +13,7 @@ from openai import OpenAI
 
 from ollama_adapter import state
 from ollama_adapter.logging_utils import TraceContextFilter
+from ollama_adapter.models import SYSTEM_PROMPT_MODES
 from ollama_adapter.prompt_renderer import init_jinja_env
 
 _DEFAULT_PROMPTS_BASE_DIR = "./prompts"
@@ -114,6 +115,7 @@ def _validate_single_ip_route(
         "name",
         "system_prompt_inline",
         "system_prompt_file",
+        "system_prompt_mode",
         "remove_thinking_tags",
         "prompt_caching",
         "params",
@@ -164,6 +166,16 @@ def _check_system_prompt_keys(entry: dict[str, Any], model_display: str, locatio
         )
 
 
+def _validate_system_prompt_mode(entry: dict[str, Any], model_display: str, location: str) -> None:
+    """Ensure `system_prompt_mode`, when present, is one of the supported modes."""
+    if "system_prompt_mode" not in entry:
+        return
+    mode = entry["system_prompt_mode"]
+    if mode not in SYSTEM_PROMPT_MODES:
+        msg = f"Model '{model_display}'{location}: 'system_prompt_mode' must be one of {SYSTEM_PROMPT_MODES}"
+        raise ValueError(msg)
+
+
 def _validate_model_entries(models_config: list[Any]) -> None:
     """Run per-model checks for system prompt fields at root and ip_routing levels."""
     for idx, model in enumerate(models_config):
@@ -171,13 +183,16 @@ def _validate_model_entries(models_config: list[Any]) -> None:
             continue
         model_display = model.get("custom_name") or model.get("name", f"models[{idx}]")
         _check_system_prompt_keys(model, model_display, "")
+        _validate_system_prompt_mode(model, model_display, "")
 
         ip_routing = model.get("ip_routing")
         if not isinstance(ip_routing, list):
             continue
         for rule_idx, rule in enumerate(ip_routing):
             if isinstance(rule, dict):
-                _check_system_prompt_keys(rule, model_display, f" ip_routing[{rule_idx}]")
+                location = f" ip_routing[{rule_idx}]"
+                _check_system_prompt_keys(rule, model_display, location)
+                _validate_system_prompt_mode(rule, model_display, location)
 
 
 def _validate_ip_routing(models_config: list[Any], clients_config: dict[str, Any] | None) -> None:
@@ -295,6 +310,38 @@ def _validate_error_handling(eh_config: Any) -> None:
         raise ValueError(msg)
 
 
+_OPENAI_API_KEYS = frozenset({"enabled", "api_keys"})
+
+
+def _validate_openai_api(openai_api_config: Any) -> None:
+    """Validate the `openai_api` section (the OpenAI-compatible `/v1` endpoints)."""
+    if not isinstance(openai_api_config, dict):
+        msg = "'openai_api' must be a dict"
+        raise TypeError(msg)
+
+    if "enabled" in openai_api_config and not isinstance(openai_api_config["enabled"], bool):
+        msg = "openai_api.enabled must be a boolean (true/false)"
+        raise ValueError(msg)
+
+    api_keys = openai_api_config.get("api_keys")
+    if api_keys is not None:
+        if not isinstance(api_keys, list):
+            msg = "openai_api.api_keys must be a list of strings"
+            raise TypeError(msg)
+        for i, key in enumerate(api_keys):
+            if not isinstance(key, str) or not key.strip():
+                msg = f"openai_api.api_keys[{i}] must be a non-empty string"
+                raise ValueError(msg)
+        openai_api_config["api_keys"] = [key.strip() for key in api_keys]
+
+    unknown_keys = set(openai_api_config) - _OPENAI_API_KEYS
+    if unknown_keys:
+        state.logger.warning("openai_api has unrecognized keys %s; they will be ignored", sorted(unknown_keys))
+
+    if openai_api_config.get("enabled", True) and not openai_api_config.get("api_keys"):
+        state.logger.warning("openai_api is enabled without api_keys: /v1 endpoints accept unauthenticated requests")
+
+
 def load_config(path: str = "config.yml") -> dict[str, Any]:
     """Load and validate YAML configuration file.
 
@@ -330,6 +377,11 @@ def load_config(path: str = "config.yml") -> dict[str, Any]:
     error_handling_config = config.get("error_handling")
     if error_handling_config is not None:
         _validate_error_handling(error_handling_config)
+
+    # Validated even when absent: `/v1` is enabled by default, so a pre-existing config
+    # must still get the "no api_keys" warning.
+    openai_api_config = config.get("openai_api")
+    _validate_openai_api({} if openai_api_config is None else openai_api_config)
 
     return config
 

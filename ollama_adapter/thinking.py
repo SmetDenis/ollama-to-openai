@@ -42,7 +42,6 @@ def remove_thinking_tags(content: str | None, model_id: str, *, remove_enabled: 
 class _StreamState(StrEnum):
     """State machine states for streaming tag removal."""
 
-    INITIAL = "INITIAL"
     DETECTING_OPEN_TAG = "DETECTING_OPEN_TAG"
     BUFFERING_THINKING = "BUFFERING_THINKING"
     DETECTING_CLOSE_TAG = "DETECTING_CLOSE_TAG"
@@ -51,135 +50,128 @@ class _StreamState(StrEnum):
 
 _OPEN_TAGS = ("<think>", "<thinking>")
 _CLOSE_TAGS = ("</think>", "</thinking>")
-_MAX_DETECT_LENGTH = 20
+_CLOSE_TAG_START = "</"
 _BUFFER_FLUSH_SIZE = 1000
-_MAX_CLOSE_TAG_LENGTH = 15
 
 
-class _StreamProcessor:
-    """State machine that removes thinking tags from a streaming response."""
+class ThinkingTagFilter:
+    """Incremental filter that removes a leading `<think>`/`<thinking>` block from streamed text.
 
-    def __init__(self, model_id: str, display_name: str, make_chunk: Callable[[str, str], dict[str, Any]]) -> None:
+    Protocol-agnostic: `feed()` returns the text that is safe to emit now (possibly empty while
+    a tag is being detected or thinking content is buffered); `flush()` returns whatever must be
+    emitted when the stream ends. Every piece of input is re-dispatched immediately after a state
+    transition, so text that shares a chunk with a tag boundary is never held back or lost.
+    """
+
+    def __init__(self, model_id: str) -> None:
+        """Create a filter in tag-detection state; `model_id` is used for logging only."""
         self._model_id = model_id
-        self._display_name = display_name
-        self._make_chunk = make_chunk
-        self._state = _StreamState.INITIAL
+        self._state = _StreamState.DETECTING_OPEN_TAG
         self._buffer = ""
         self._thinking_buffer = ""
         self._close_tag_buffer = ""
+        self._strip_leading = False
 
-    def process(self, response_stream: Any, usage: dict[str, int]) -> Generator[str]:
-        """Process the entire stream, yielding JSON-encoded chunks."""
-        for chunk in response_stream:
-            if chunk.usage:
-                usage["prompt_tokens"] = chunk.usage.prompt_tokens
-                usage["completion_tokens"] = chunk.usage.completion_tokens
+    def feed(self, text: str) -> str:
+        """Consume a streamed text fragment and return the part that can be emitted now."""
+        if self._state == _StreamState.DETECTING_OPEN_TAG:
+            return self._detect_open(text)
+        if self._state == _StreamState.BUFFERING_THINKING:
+            return self._buffer_thinking(text)
+        if self._state == _StreamState.DETECTING_CLOSE_TAG:
+            return self._detect_close(text)
+        if self._strip_leading:
+            text = text.lstrip()
+            self._strip_leading = not text
+        return text
 
-            if not chunk.choices:
-                continue
-
-            content = chunk.choices[0].delta.content
-            if not content:
-                continue
-
-            yield from self._handle_content(content)
-
-        yield from self._flush_remaining()
-
-    def _handle_content(self, content: str) -> Generator[str]:
-        """Dispatch content to the appropriate state handler."""
-        handler = {
-            _StreamState.INITIAL: self._handle_initial,
-            _StreamState.DETECTING_OPEN_TAG: self._handle_detecting_open,
-            _StreamState.BUFFERING_THINKING: self._handle_buffering,
-            _StreamState.DETECTING_CLOSE_TAG: self._handle_detecting_close,
-            _StreamState.STREAMING_NORMAL: self._handle_normal,
-        }[self._state]
-        yield from handler(content)
-
-    def _handle_initial(self, content: str) -> Generator[str]:
-        self._buffer = content
-        self._state = _StreamState.DETECTING_OPEN_TAG
-        yield from ()
-
-    def _handle_detecting_open(self, content: str) -> Generator[str]:
-        self._buffer += content
-        buffer_lower = self._buffer.lstrip().lower()
-
-        for tag in _OPEN_TAGS:
-            if buffer_lower.startswith(tag):
-                whitespace_len = len(self._buffer) - len(self._buffer.lstrip())
-                self._buffer = self._buffer[whitespace_len + len(tag) :]
-                self._thinking_buffer = ""
-                self._state = _StreamState.BUFFERING_THINKING
-                state.logger.debug("Detected opening %s tag for model '%s'", tag, self._model_id)
-                return
-
-        stripped = self._buffer.lstrip()
-        if len(buffer_lower) > _MAX_DETECT_LENGTH or (stripped and stripped[0] != "<"):
-            self._state = _StreamState.STREAMING_NORMAL
-            state.logger.debug("No thinking tag detected for model '%s'", self._model_id)
-            if self._buffer:
-                yield self._emit(self._buffer)
-                self._buffer = ""
-
-    def _handle_buffering(self, content: str) -> Generator[str]:
-        self._buffer += content
-
-        if "</" in self._buffer:
-            close_idx = self._buffer.index("</")
-            self._thinking_buffer += self._buffer[:close_idx]
-            self._close_tag_buffer = self._buffer[close_idx:]
-            self._buffer = ""
-            self._state = _StreamState.DETECTING_CLOSE_TAG
-        elif len(self._buffer) > _BUFFER_FLUSH_SIZE:
-            self._thinking_buffer += self._buffer
-            self._buffer = ""
-        yield from ()
-
-    def _handle_detecting_close(self, content: str) -> Generator[str]:
-        self._close_tag_buffer += content
-        close_lower = self._close_tag_buffer.lower()
-
-        for tag in _CLOSE_TAGS:
-            if close_lower.startswith(tag):
-                remainder = self._close_tag_buffer[len(tag) :].lstrip()
-                self._log_removed_thinking()
-                self._state = _StreamState.STREAMING_NORMAL
-                self._thinking_buffer = ""
-                self._close_tag_buffer = ""
-                if remainder:
-                    yield self._emit(remainder)
-                return
-
-        is_not_prefix = ">" in self._close_tag_buffer and not any(
-            close_lower.startswith(t[: len(close_lower)]) for t in _CLOSE_TAGS
-        )
-        if len(self._close_tag_buffer) > _MAX_CLOSE_TAG_LENGTH or is_not_prefix:
-            self._thinking_buffer += self._close_tag_buffer
-            self._close_tag_buffer = ""
-            self._state = _StreamState.BUFFERING_THINKING
-
-    def _handle_normal(self, content: str) -> Generator[str]:
-        yield self._emit(content)
-
-    def _flush_remaining(self) -> Generator[str]:
-        """Flush any buffered content at end of stream."""
-        if self._state == _StreamState.DETECTING_OPEN_TAG and self._buffer:
-            yield self._emit(self._buffer)
-        elif self._state in (_StreamState.BUFFERING_THINKING, _StreamState.DETECTING_CLOSE_TAG):
-            fallback = self._thinking_buffer + self._close_tag_buffer
+    def flush(self) -> str:
+        """Return the remaining text at end of stream and reset to pass-through mode."""
+        state_at_end = self._state
+        self._state = _StreamState.STREAMING_NORMAL
+        if state_at_end == _StreamState.DETECTING_OPEN_TAG:
+            out, self._buffer = self._buffer, ""
+            return out
+        if state_at_end in (_StreamState.BUFFERING_THINKING, _StreamState.DETECTING_CLOSE_TAG):
+            fallback = self._thinking_buffer + self._buffer + self._close_tag_buffer
+            self._thinking_buffer = self._buffer = self._close_tag_buffer = ""
             state.logger.warning(
                 "Stream ended while buffering thinking content for model '%s'. "
                 "No closing tag found. Outputting %d chars as fallback.",
                 self._model_id,
                 len(fallback),
             )
-            if fallback.strip():
-                yield self._emit(fallback)
+            return fallback if fallback.strip() else ""
+        return ""
 
-    def _emit(self, content: str) -> str:
-        return json.dumps(self._make_chunk(self._display_name, content)) + "\n"
+    def _detect_open(self, text: str) -> str:
+        self._buffer += text
+        stripped_lower = self._buffer.lstrip().lower()
+
+        for tag in _OPEN_TAGS:
+            if stripped_lower.startswith(tag):
+                whitespace_len = len(self._buffer) - len(self._buffer.lstrip())
+                rest = self._buffer[whitespace_len + len(tag) :]
+                self._buffer = ""
+                self._thinking_buffer = ""
+                self._state = _StreamState.BUFFERING_THINKING
+                state.logger.debug("Detected opening %s tag for model '%s'", tag, self._model_id)
+                return self._buffer_thinking(rest)
+
+        if any(tag.startswith(stripped_lower) for tag in _OPEN_TAGS):
+            return ""
+
+        self._state = _StreamState.STREAMING_NORMAL
+        state.logger.debug("No thinking tag detected for model '%s'", self._model_id)
+        out, self._buffer = self._buffer, ""
+        return out
+
+    def _buffer_thinking(self, text: str) -> str:
+        self._buffer += text
+
+        while _CLOSE_TAG_START in self._buffer:
+            close_idx = self._buffer.index(_CLOSE_TAG_START)
+            self._thinking_buffer += self._buffer[:close_idx]
+            candidate = self._buffer[close_idx:]
+            self._buffer = ""
+            candidate_lower = candidate.lower()
+
+            for tag in _CLOSE_TAGS:
+                if candidate_lower.startswith(tag):
+                    return self._finish_thinking(candidate[len(tag) :])
+
+            if any(tag.startswith(candidate_lower) for tag in _CLOSE_TAGS):
+                self._close_tag_buffer = candidate
+                self._state = _StreamState.DETECTING_CLOSE_TAG
+                return ""
+
+            # Not a closing tag after all: keep "</" as thinking text and rescan the rest.
+            self._thinking_buffer += _CLOSE_TAG_START
+            self._buffer = candidate[len(_CLOSE_TAG_START) :]
+
+        if len(self._buffer) > _BUFFER_FLUSH_SIZE:
+            # Keep a trailing "<" so a close tag split right after it is still detected.
+            keep = 1 if self._buffer.endswith("<") else 0
+            cut = len(self._buffer) - keep
+            self._thinking_buffer += self._buffer[:cut]
+            self._buffer = self._buffer[cut:]
+        return ""
+
+    def _detect_close(self, text: str) -> str:
+        candidate = self._close_tag_buffer + text
+        self._close_tag_buffer = ""
+        self._state = _StreamState.BUFFERING_THINKING
+        return self._buffer_thinking(candidate)
+
+    def _finish_thinking(self, after_tag: str) -> str:
+        remainder = after_tag.lstrip()
+        self._log_removed_thinking()
+        self._state = _StreamState.STREAMING_NORMAL
+        self._thinking_buffer = ""
+        # Mirror the non-streaming regex: whitespace after the close tag is dropped
+        # even when it arrives in later fragments.
+        self._strip_leading = not remainder
+        return remainder
 
     def _log_removed_thinking(self) -> None:
         preview = (
@@ -193,6 +185,12 @@ class _StreamProcessor:
             len(self._thinking_buffer),
             preview,
         )
+
+
+def _record_usage(chunk: Any, usage: dict[str, int]) -> None:
+    if chunk.usage:
+        usage["prompt_tokens"] = chunk.usage.prompt_tokens
+        usage["completion_tokens"] = chunk.usage.completion_tokens
 
 
 @dataclass(frozen=True)
@@ -210,7 +208,7 @@ def process_stream(
     ctx: StreamContext,
     usage: dict[str, int],
 ) -> Generator[str]:
-    """Process OpenAI streaming response, optionally removing thinking tags.
+    """Process OpenAI streaming response into Ollama ndjson lines, optionally removing thinking tags.
 
     Shared logic for both /api/chat and /api/generate endpoints.
 
@@ -223,18 +221,21 @@ def process_stream(
         JSON-encoded response lines ending with newline.
 
     """
-    if ctx.remove_tags:
-        processor = _StreamProcessor(ctx.model_id, ctx.display_name, ctx.make_chunk)
-        yield from processor.process(response_stream, usage)
-    else:
-        for chunk in response_stream:
-            if chunk.usage:
-                usage["prompt_tokens"] = chunk.usage.prompt_tokens
-                usage["completion_tokens"] = chunk.usage.completion_tokens
+    tag_filter = ThinkingTagFilter(ctx.model_id) if ctx.remove_tags else None
 
-            if not chunk.choices:
-                continue
+    def emit(content: str) -> str:
+        return json.dumps(ctx.make_chunk(ctx.display_name, content)) + "\n"
 
-            content = chunk.choices[0].delta.content
-            if content:
-                yield json.dumps(ctx.make_chunk(ctx.display_name, content)) + "\n"
+    for chunk in response_stream:
+        _record_usage(chunk, usage)
+        if not chunk.choices:
+            continue
+        content = chunk.choices[0].delta.content
+        if not content:
+            continue
+        out = tag_filter.feed(content) if tag_filter else content
+        if out:
+            yield emit(out)
+
+    if tag_filter and (tail := tag_filter.flush()):
+        yield emit(tail)
