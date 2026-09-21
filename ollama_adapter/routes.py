@@ -23,6 +23,7 @@ from ollama_adapter.completion import (
 from ollama_adapter.debug_prompt import is_debug_trigger, last_user_text
 from ollama_adapter.error_formatter import format_error_text
 from ollama_adapter.error_formatter import is_enabled as error_handling_enabled
+from ollama_adapter.input_cleanup import clean_last_user_message, strip_input_prefix
 from ollama_adapter.logging_utils import (
     get_client_ip,
     log_endpoint,
@@ -402,6 +403,9 @@ def chat() -> Response | tuple[Response, int]:  # noqa: PLR0911
         if not isinstance(messages, list) or not messages:
             return jsonify({"error": "Parameter 'messages' must be a non-empty list"}), 400
 
+        # Drop the client's label line ("Text:") before debug detection and the upstream call.
+        messages = clean_last_user_message(messages)
+
         ctx = _CompletionContext(
             model_id=model_id,
             display_name=model_id,
@@ -454,6 +458,9 @@ def generate() -> Response | tuple[Response, int]:  # noqa: PLR0911
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             return jsonify({"error": "Parameter 'prompt' must be a non-empty string"}), 400
+
+        # Drop the client's label line ("Text:") before debug detection and the upstream call.
+        prompt = strip_input_prefix(prompt)
 
         messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
 

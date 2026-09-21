@@ -693,3 +693,54 @@ class TestHealth:
         resp = client.get("/health")
         assert resp.status_code == 503
         assert resp.get_json()["status"] == "unhealthy"
+
+
+# ---------------------------------------------------------------------------
+# Client label prefix ("Text:") cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestInputPrefixCleanup:
+    def test_chat_debug_behind_prefix(self, client, mock_openai_client):
+        state.CONFIG = {"models": [{"name": "openai/gpt-4o", "system_prompt_inline": "You are helpful."}]}
+        resp = client.post(
+            "/api/chat",
+            json={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "Text:\ndebug"}]},
+        )
+        assert resp.status_code == 200
+        assert "═══ model config ═══" in resp.get_json()["message"]["content"]
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_chat_prefix_removed_upstream(self, client, mock_openai_client):
+        mock_openai_client.chat.completions.create.return_value = make_mock_completion("ok")
+        resp = client.post(
+            "/api/chat",
+            json={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "Текст:\nпривет"}]},
+        )
+        assert resp.status_code == 200
+        sent = mock_openai_client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[-1]["content"] == "привет"
+
+    def test_generate_debug_behind_prefix(self, client, mock_openai_client):
+        state.CONFIG = {"models": [{"name": "openai/gpt-4o", "system_prompt_inline": "You are helpful."}]}
+        resp = client.post("/api/generate", json={"model": "openai/gpt-4o", "prompt": "Text:\ndebug"})
+        assert resp.status_code == 200
+        assert "═══ model config ═══" in resp.get_json()["response"]
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_generate_prefix_removed_upstream(self, client, mock_openai_client):
+        mock_openai_client.chat.completions.create.return_value = make_mock_completion("ok")
+        resp = client.post("/api/generate", json={"model": "openai/gpt-4o", "prompt": "Text:\nwrite a haiku"})
+        assert resp.status_code == 200
+        sent = mock_openai_client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[-1]["content"] == "write a haiku"
+
+    def test_disabled_keeps_prefix(self, client, mock_openai_client):
+        state.CONFIG = {**state.CONFIG, "input_cleanup": {"enabled": False}}
+        mock_openai_client.chat.completions.create.return_value = make_mock_completion("ok")
+        client.post(
+            "/api/chat",
+            json={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "Text:\nhi"}]},
+        )
+        sent = mock_openai_client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[-1]["content"] == "Text:\nhi"

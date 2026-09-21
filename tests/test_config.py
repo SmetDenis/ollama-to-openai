@@ -368,6 +368,49 @@ class TestLoadConfigErrorHandling:
 
 
 # ---------------------------------------------------------------------------
+# load_config: validation errors — input_cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfigInputCleanup:
+    def _write(self, tmp_path, config):
+        path = tmp_path / "c.yml"
+        path.write_text(yaml.dump(config, allow_unicode=True))
+        return str(path)
+
+    def test_not_dict(self, tmp_path, minimal_config):
+        minimal_config["input_cleanup"] = ["Text:"]
+        with pytest.raises(TypeError, match="'input_cleanup' must be a dict"):
+            load_config(self._write(tmp_path, minimal_config))
+
+    def test_enabled_not_bool(self, tmp_path, minimal_config):
+        minimal_config["input_cleanup"] = {"enabled": "yes"}
+        with pytest.raises(ValueError, match=r"input_cleanup\.enabled must be a boolean"):
+            load_config(self._write(tmp_path, minimal_config))
+
+    def test_prefixes_not_list(self, tmp_path, minimal_config):
+        minimal_config["input_cleanup"] = {"strip_prefixes": "Text:"}
+        with pytest.raises(TypeError, match="must be a list of strings"):
+            load_config(self._write(tmp_path, minimal_config))
+
+    def test_prefix_entry_blank(self, tmp_path, minimal_config):
+        minimal_config["input_cleanup"] = {"strip_prefixes": ["Text:", "  "]}
+        with pytest.raises(ValueError, match=r"strip_prefixes\[1\] must be a non-empty string"):
+            load_config(self._write(tmp_path, minimal_config))
+
+    def test_full_section_accepted(self, tmp_path, minimal_config):
+        minimal_config["input_cleanup"] = {"enabled": True, "strip_prefixes": ["Text:", "Текст:"]}
+        config = load_config(self._write(tmp_path, minimal_config))
+        assert config["input_cleanup"]["strip_prefixes"] == ["Text:", "Текст:"]
+
+    def test_unknown_key_warns(self, tmp_path, minimal_config):
+        minimal_config["input_cleanup"] = {"strip_suffixes": ["Text:"]}
+        with patch.object(state.logger, "warning") as mock_warning:
+            load_config(self._write(tmp_path, minimal_config))
+        assert any("unrecognized keys" in str(call) for call in mock_warning.call_args_list)
+
+
+# ---------------------------------------------------------------------------
 # load_config: file errors
 # ---------------------------------------------------------------------------
 

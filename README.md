@@ -15,6 +15,7 @@ A Python service that translates Ollama API requests to OpenAI API calls, enabli
 - Built-in date/time placeholders in prompts — `now` object, flat parts (`year`, `month`, `day`, `hour`, `minute`, `weekday`), and presets (`date_human`, `time_human`, `datetime_human`, `date_iso`, `datetime_iso`), computed per request in a configurable `prompts.timezone`; enables conditionals like `{% if weekday == "Friday" %}…{% endif %}`
 - Prompt caching support (Anthropic/Gemini via LiteLLM)
 - `<think>`/`<thinking>` tag removal (streaming and non-streaming)
+- Client label cleanup — a leading `Text:` / `Текст:` line (Raycast) is stripped from the last user message before the `debug` check and before the upstream call; configurable via `input_cleanup`
 - Runtime error translation — upstream failures (rate limit, auth, timeout, 5xx) become assistant messages with a `[LLM ERROR]` prefix so clients like Raycast always see a readable explanation instead of an HTTP 500
 - Config hot-reload — changes to `config.yml` apply without restart
 - Request/response logging with optional LiteLLM tracing integration
@@ -228,6 +229,35 @@ openai_api:
 - Authentication applies to `/v1` only — Ollama endpoints stay open. Without `api_keys` (including configs that have no `openai_api` section at all) a warning is logged at startup and on every config reload. Set `api_keys` whenever the port is reachable beyond localhost (the `debug` keyword reveals compiled system prompts).
 - Not implemented: `/v1/responses`, `/v1/embeddings`.
 
+### Client Input Cleanup
+
+Some clients prepend a label line to what they send. Raycast sends:
+
+```text
+Text:
+<what the user actually typed>
+```
+
+The adapter strips that label from the **last user message** before the `debug` keyword check
+and before the upstream request is built — so `Text:\ndebug` still returns the compiled prompt,
+and the model never sees the label.
+
+```yaml
+input_cleanup:
+    enabled: true          # false -> nothing is stripped
+    strip_prefixes:        # REPLACES the defaults entirely
+        - "Text:"
+        - "Текст:"
+        - "Prompt:"
+```
+
+Defaults when the section is absent: enabled, with `["Text:", "Текст:"]`.
+
+- The label must be the **whole first line**: prefix, optional spaces/tabs, then a line break (case-insensitive). A mid-text `Text: ...` is left alone, and so is `Text: debug` on a single line.
+- A message consisting of nothing but the label is left untouched (it would otherwise become an empty request).
+- Only the last user message is touched — earlier turns keep whatever the client sent. For a content-part message (`/v1` with images) only the first text part is cleaned.
+- Applies to `/api/chat`, `/api/generate`, `/v1/chat/completions` and `/v1/completions`.
+
 ### Tracing (LiteLLM Integration)
 
 ```yaml
@@ -352,6 +382,7 @@ ollama_adapter/
   thinking.py          # <think>/<thinking> tag removal (regex + ThinkingTagFilter for streams)
   prompt_renderer.py   # Jinja2 sandboxed environment + PromptRenderError
   error_formatter.py   # Runtime errors -> "[LLM ERROR]" assistant text (Ollama endpoints)
+  input_cleanup.py     # Strips client label prefixes ("Text:") from the last user message
   debug_prompt.py      # "debug" keyword: compiled prompt output
   models.py            # Model resolution, caching, IP routing, system prompts
   completion.py        # Shared upstream pipeline (param merge, prompts, headers, upstream call)

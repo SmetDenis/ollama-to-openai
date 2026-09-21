@@ -541,3 +541,47 @@ class TestAppRouting:
         mock_openai_client.chat.completions.create.return_value = completion()
         client = self._client(config_file, minimal_config, mock_openai_client)
         assert client.post("/v1/chat/completions", json={"model": "m", "messages": USER}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Client label prefix ("Text:") cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestInputPrefixCleanup:
+    def test_chat_debug_behind_prefix(self, v1_client, mock_openai_client):
+        state.CONFIG["models"] = [{"name": "m", "system_prompt_inline": "CFG"}]
+        resp = v1_client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "Text:\ndebug"}]},
+        )
+        content = resp.get_json()["choices"][0]["message"]["content"]
+        assert "═══ model config ═══" in content
+        mock_openai_client.chat.completions.create.assert_not_called()
+
+    def test_chat_prefix_removed_upstream(self, v1_client, mock_openai_client):
+        mock_openai_client.chat.completions.create.return_value = completion()
+        v1_client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "Text:\nhello"}]},
+        )
+        sent = mock_openai_client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[-1]["content"] == "hello"
+
+    def test_chat_content_parts_prefix_removed(self, v1_client, mock_openai_client):
+        mock_openai_client.chat.completions.create.return_value = completion()
+        messages = [{"role": "user", "content": [{"type": "text", "text": "Text:\nhello"}]}]
+        v1_client.post("/v1/chat/completions", json={"model": "m", "messages": messages})
+        sent = mock_openai_client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[-1]["content"][0]["text"] == "hello"
+
+    def test_legacy_completions_prefix_removed(self, v1_client, mock_openai_client):
+        mock_openai_client.chat.completions.create.return_value = completion()
+        v1_client.post("/v1/completions", json={"model": "m", "prompt": "Text:\nhello"})
+        sent = mock_openai_client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[-1]["content"] == "hello"
+
+    def test_legacy_completions_debug_behind_prefix(self, v1_client, mock_openai_client):
+        resp = v1_client.post("/v1/completions", json={"model": "m", "prompt": "Text:\ndebug"})
+        assert "═══ model config ═══" in resp.get_json()["choices"][0]["text"]
+        mock_openai_client.chat.completions.create.assert_not_called()

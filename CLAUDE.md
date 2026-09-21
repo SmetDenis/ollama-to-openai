@@ -23,6 +23,7 @@ ollama_adapter/
   thinking.py          # remove_thinking_tags(), ThinkingTagFilter (streaming feed/flush), process_stream()
   prompt_renderer.py   # init_jinja_env(), render_file(), render_inline(), PromptRenderError
   error_formatter.py   # categorize_error(), format_error_text() — runtime errors → LLM-style text
+  input_cleanup.py     # strip_input_prefix(), clean_last_user_message() — drops client label prefixes
   debug_prompt.py      # debug keyword detection + compiled-prompt output (markers)
   models.py            # Models, prompts (system_prompt_mode), IP-routing, model config
   completion.py        # Shared upstream pipeline: model resolution, param merge, prompts, headers, upstream call
@@ -35,13 +36,13 @@ ollama_adapter/
 
 ### Import Graph
 
-`state.py` is a leaf node (imports nothing from the package). All modules import `state`. `prompt_renderer.py` is a leaf (imports only `jinja2`, no project modules). `models.py` imports `prompt_renderer`. `debug_prompt.py` is a near-leaf: imports `state`, `models`, and `prompt_renderer`. `completion.py` imports `models`, `tracing`, `debug_prompt`. `openai_errors.py` imports `prompt_renderer`; `openai_translate.py` imports `thinking`. `routes.py` imports `completion`, `logging_utils`, `tracing`, `thinking`, `models`, `prompt_renderer`, `debug_prompt`, `error_formatter`. `openai_routes.py` imports `completion`, `openai_errors`, `openai_translate`, `logging_utils`, `models`, `debug_prompt`. `config.py` imports `logging_utils` (TraceContextFilter), `prompt_renderer` (init_jinja_env), and `models` (`SYSTEM_PROMPT_MODES`; `get_and_cache_models` on reload). `app.py` imports both blueprints and `openai_errors`. No circular dependencies.
+`state.py` is a leaf node (imports nothing from the package). All modules import `state`. `prompt_renderer.py` is a leaf (imports only `jinja2`, no project modules). `models.py` imports `prompt_renderer`. `debug_prompt.py` is a near-leaf: imports `state`, `models`, and `prompt_renderer`. `completion.py` imports `models`, `tracing`, `debug_prompt`. `input_cleanup.py` is a leaf (imports only `state`). `openai_errors.py` imports `prompt_renderer`; `openai_translate.py` imports `thinking`. `routes.py` imports `completion`, `logging_utils`, `tracing`, `thinking`, `models`, `prompt_renderer`, `debug_prompt`, `error_formatter`, `input_cleanup`. `openai_routes.py` imports `completion`, `openai_errors`, `openai_translate`, `logging_utils`, `models`, `debug_prompt`, `input_cleanup`. `config.py` imports `logging_utils` (TraceContextFilter), `prompt_renderer` (init_jinja_env), `input_cleanup` (`INPUT_CLEANUP_KEYS`), and `models` (`SYSTEM_PROMPT_MODES`; `get_and_cache_models` on reload). `app.py` imports both blueprints and `openai_errors`. No circular dependencies.
 
 ### Request Flow
 
 1. `@app.before_request` (`app.py`) — checks `config.yml` mtime; on change, reloads config, recreates the OpenAI client, and refreshes the model cache
 2. `@log_endpoint` decorator (`logging_utils.py`) — logs request/response and measures duration
-3. Endpoint handler — `routes.py` (Ollama) or `openai_routes.py` (`/v1`, preceded by the app-wide `_guard` hook registered via `bp.before_app_request` and limited to `/v1` paths: `openai_api.enabled` and Bearer `api_keys`, section read once; runs for unmatched `/v1` URLs too) — validates input, then goes through `completion.py`: `resolve_model` → (`/v1` only: `merge_client_params`) → `prepare_messages` → `build_upstream_request` → `open_chat_completion`; the response is formatted as Ollama ndjson/JSON or OpenAI JSON/SSE
+3. Endpoint handler — `routes.py` (Ollama) or `openai_routes.py` (`/v1`, preceded by the app-wide `_guard` hook registered via `bp.before_app_request` and limited to `/v1` paths: `openai_api.enabled` and Bearer `api_keys`, section read once; runs for unmatched `/v1` URLs too) — validates input, strips client label prefixes (`input_cleanup.py`), then goes through `completion.py`: `resolve_model` → (`/v1` only: `merge_client_params`) → `prepare_messages` → `build_upstream_request` → `open_chat_completion`; the response is formatted as Ollama ndjson/JSON or OpenAI JSON/SSE
 4. If tracing is enabled — `@app.before_request` generates `request_id`/`trace_id`, which are injected into logs via `TraceContextFilter`
 
 ### Key Functions
@@ -58,6 +59,7 @@ ollama_adapter/
 - **`_build_datetime_vars()`** (`models.py`) — computes per-request built-in date/time template vars (`now` object, flat parts, human/ISO presets) in `prompts.timezone` (default UTC)
 - **`init_jinja_env(base_dir)`** / **`render_file(env, path, vars)`** / **`render_inline(env, text, vars)`** (`prompt_renderer.py`) — Jinja2 sandboxed renderer; all errors wrap into `PromptRenderError`
 - **`apply_prompt_caching(messages, adapter_params, model_id)`** (`models.py`) — adds `cache_control` markers for Anthropic/Gemini
+- **`strip_input_prefix(text)`** / **`clean_last_user_message(messages)`** (`input_cleanup.py`) — remove a leading client label line (`Text:` / `Текст:`) from the last user message; called by all four completion routes right after input validation, before debug detection and before the upstream request
 - **`categorize_error(exc)`** / **`format_error_text(exc)`** / **`is_enabled()`** (`error_formatter.py`) — translate runtime errors into user-facing assistant content
 - **`remove_thinking_tags(content, model_id, remove_enabled)`** (`thinking.py`) — strips `<think>`/`<thinking>` tags
 - **`ThinkingTagFilter.feed(text)` / `.flush()`** (`thinking.py`) — protocol-agnostic streaming tag removal (state machine; re-dispatches text sharing a chunk with a tag boundary, iterative close-tag scan); used by `process_stream()` (Ollama ndjson) and `iter_chat_chunks()` (`/v1`, one filter per choice index)
@@ -92,6 +94,14 @@ Every rendered prompt also receives built-in date/time variables computed per re
 The OpenAI-compatible `/v1` endpoints never use `error_handling`: they answer with real HTTP status codes and the OpenAI error body `{"error": {message, type, param, code}}` (`openai_errors.py`), including `PromptRenderError` (HTTP 500, type `prompt_render_error`).
 
 Variable priority (low → high): built-in date/time → `prompts.vars` → `model.prompt_vars` → `ip_routing[matched].prompt_vars`. Merge is shallow over top-level keys; `prompt_vars` participates in `apply_ip_routing` alongside `params`/`headers`.
+
+### Client Input Cleanup
+
+Some clients prepend a label line to the text they send (Raycast sends `Text:\n<text>`). `input_cleanup.py` strips it from the **last user message only**, and all four completion routes call it right after input validation — before `is_debug_trigger` and before `_CompletionContext`/`_complete`, so `Text:\ndebug` still reaches the debug short-circuit and the label never goes upstream (the debug dump therefore shows the cleaned messages).
+
+Matching per prefix is `^\s*PREFIX[ \t]*\r?\n\s*` (case-insensitive): the label must own the whole first line. A mid-text `Text: ...`, a single-line `Text: debug`, and a prefix hidden inside markup (`<user_input>Text: ...`) are all left alone — tag stripping stays detection-only and never rewrites forwarded content. A match is rejected when only whitespace would remain, which keeps the non-empty `prompt` invariant of `/api/generate` and `/v1/completions`. For a content-part message only the first `text` part is cleaned. Input lists/dicts are never mutated — a hit returns new objects.
+
+Configured via the optional `input_cleanup` section (`enabled`, `strip_prefixes`; a configured list replaces the defaults, `enabled: false` restores raw client text). Design decisions and rejected options: `docs/superpowers/specs/2026-09-21-input-prefix-cleanup-design.md`.
 
 ### Debug Prompt Output
 
@@ -135,6 +145,7 @@ uv sync
 - **`tracing`**: LiteLLM proxy integration — request_id/trace_id, headers, tags
 - **`prompts`**: `base_dir` (default `./prompts`), `timezone` (IANA name for built-in date/time vars, default `UTC`), and `vars` (global Jinja2 variables)
 - **`error_handling`** (optional): `enabled`, `show_details`, `include_type`, `prefix` — controls whether runtime errors in `/api/chat` and `/api/generate` are translated into LLM-style responses (default: enabled, prefix `[LLM ERROR]`)
+- **`input_cleanup`** (optional): `enabled` (default `true`), `strip_prefixes` (default `["Text:", "Текст:"]`; a configured list replaces the defaults) — strips a client label line from the last user message
 - **`openai_api`** (optional): `enabled` (default `true`; `false` → every `/v1` path and method 404), `api_keys` (Bearer tokens for `/v1` only; empty/missing → no auth, logged as a warning at load even when the section is absent; constant-time compare)
 - **`models`**: model list with a two-level structure:
   - Root level: `name` (required), `custom_name`, `remove_thinking_tags`, `prompt_caching`, `system_prompt_inline`, `system_prompt_file` (mutually exclusive; file wins on conflict; legacy `system_prompt` deprecated), `system_prompt_mode` (`replace`/`prepend`/`append`), `prompt_vars` (overrides global `prompts.vars`)

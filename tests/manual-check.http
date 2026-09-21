@@ -443,3 +443,46 @@ Authorization: Bearer sk-local-change-me
 Content-Type: application/json
 
 {}
+
+### 40. Client label prefix - "Text:\ndebug" must still hit the debug output
+POST http://127.0.0.1:11434/api/chat
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+        {"role": "user", "content": "Text:\ndebug"}
+    ]
+}
+
+### 41. Client label prefix - stripped before the model sees it (check message[N] in the debug dump)
+POST http://127.0.0.1:11434/api/generate
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "prompt": "Текст:\ndebug"
+}
+
+### 42. /v1 - Client label prefix on a content-part message
+POST http://127.0.0.1:11434/v1/chat/completions
+Authorization: Bearer sk-local-change-me
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "Text:\ndebug"}]}
+    ]
+}
+
+### 43. Client label prefix - NOT stripped on one line (expect a normal model answer)
+POST http://127.0.0.1:11434/api/chat
+Content-Type: application/json
+
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+        {"role": "user", "content": "Text: say hi"}
+    ]
+}

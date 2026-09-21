@@ -47,6 +47,9 @@ ignore = [
     "TD",     # todo formatting
     "EXE002", # executable-no-shebang — SMB filesystem does not support chmod
     "ANN401", # dynamically-typed-expressions — unavoidable with Flask/OpenAI SDK
+    "RUF001", # ambiguous-unicode-character-string — Cyrillic literals are intentional (e.g. "Текст:")
+    "RUF002", # ambiguous-unicode-character-docstring — same, in docstrings
+    "RUF003", # ambiguous-unicode-character-comment — same, in comments
 ]
 
 [tool.pytest.ini_options]

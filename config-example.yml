@@ -103,6 +103,25 @@ logging:
 #   include_type: true       # include the category in the rendered text (false → only details)
 #   prefix: "[LLM ERROR]"    # visible prefix in the assistant message
 
+# Client input cleanup (optional)
+# Some clients prepend a label line to the text they send — Raycast sends:
+#     Text:
+#     <what the user actually typed>
+# The label is stripped from the LAST user message before the `debug` keyword check and
+# before the request goes upstream, so "Text:\ndebug" still triggers the debug output and
+# the model never sees the label.
+# Matching is narrow on purpose: the label must be the whole first line (prefix, optional
+# spaces/tabs, line break), case-insensitive; a mid-text "Text: ..." is left alone, and a
+# message consisting of nothing but the label is left alone too.
+# Applies to /api/chat, /api/generate, /v1/chat/completions and /v1/completions.
+# Defaults (section absent): enabled, prefixes ["Text:", "Текст:"].
+# input_cleanup:
+#   enabled: true            # false -> nothing is stripped (raw client text goes upstream)
+#   strip_prefixes:          # REPLACES the defaults entirely
+#     - "Text:"
+#     - "Текст:"
+#     - "Prompt:"
+
 # Tracing configuration (optional)
 # Request tracing, correlation IDs, and LiteLLM proxy header integration
 # When enabled, each request gets a unique request_id and trace_id visible in logs

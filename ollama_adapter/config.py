@@ -12,6 +12,7 @@ from jinja2.sandbox import SandboxedEnvironment
 from openai import OpenAI
 
 from ollama_adapter import state
+from ollama_adapter.input_cleanup import INPUT_CLEANUP_KEYS
 from ollama_adapter.logging_utils import TraceContextFilter
 from ollama_adapter.models import SYSTEM_PROMPT_MODES
 from ollama_adapter.prompt_renderer import init_jinja_env
@@ -310,6 +311,31 @@ def _validate_error_handling(eh_config: Any) -> None:
         raise ValueError(msg)
 
 
+def _validate_input_cleanup(cleanup_config: Any) -> None:
+    """Validate the `input_cleanup` section (client label prefixes stripped from the input)."""
+    if not isinstance(cleanup_config, dict):
+        msg = "'input_cleanup' must be a dict"
+        raise TypeError(msg)
+
+    if "enabled" in cleanup_config and not isinstance(cleanup_config["enabled"], bool):
+        msg = "input_cleanup.enabled must be a boolean (true/false)"
+        raise ValueError(msg)
+
+    prefixes = cleanup_config.get("strip_prefixes")
+    if prefixes is not None:
+        if not isinstance(prefixes, list):
+            msg = "input_cleanup.strip_prefixes must be a list of strings"
+            raise TypeError(msg)
+        for i, prefix in enumerate(prefixes):
+            if not isinstance(prefix, str) or not prefix.strip():
+                msg = f"input_cleanup.strip_prefixes[{i}] must be a non-empty string"
+                raise ValueError(msg)
+
+    unknown_keys = set(cleanup_config) - INPUT_CLEANUP_KEYS
+    if unknown_keys:
+        state.logger.warning("input_cleanup has unrecognized keys %s; they will be ignored", sorted(unknown_keys))
+
+
 _OPENAI_API_KEYS = frozenset({"enabled", "api_keys"})
 
 
@@ -377,6 +403,10 @@ def load_config(path: str = "config.yml") -> dict[str, Any]:
     error_handling_config = config.get("error_handling")
     if error_handling_config is not None:
         _validate_error_handling(error_handling_config)
+
+    input_cleanup_config = config.get("input_cleanup")
+    if input_cleanup_config is not None:
+        _validate_input_cleanup(input_cleanup_config)
 
     # Validated even when absent: `/v1` is enabled by default, so a pre-existing config
     # must still get the "no api_keys" warning.

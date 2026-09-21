@@ -26,6 +26,7 @@ from ollama_adapter.completion import (
     resolve_model,
 )
 from ollama_adapter.debug_prompt import is_debug_trigger, last_user_text
+from ollama_adapter.input_cleanup import clean_last_user_message, strip_input_prefix
 from ollama_adapter.logging_utils import get_client_ip, log_endpoint
 from ollama_adapter.models import get_and_cache_models, is_model_allowed, resolve_model_name
 from ollama_adapter.openai_errors import OpenAIHTTPError, error_response, render_error, to_openai_error
@@ -362,6 +363,9 @@ def chat_completions() -> Response:
         raise _bad_request(msg, param="messages")
     streaming = _parse_stream(body)
 
+    # Drop the client's label line ("Text:") before debug detection and the upstream call.
+    messages = clean_last_user_message(messages)
+
     text = last_user_text(messages, include_parts=True)
     debug = text is not None and is_debug_trigger(text)
     return _complete(body, model_id, messages, streaming=streaming, legacy=False, debug=debug)
@@ -375,7 +379,7 @@ def completions() -> Response:
     body = _json_body()
     model_id = _require_model(body)
     streaming = _parse_stream(body)
-    prompt = _parse_prompt(body.get("prompt"))
+    prompt = strip_input_prefix(_parse_prompt(body.get("prompt")))
     _reject_legacy_only_params(body)
 
     client_params = {k: v for k, v in body.items() if k not in _LEGACY_ONLY_PARAMS}
